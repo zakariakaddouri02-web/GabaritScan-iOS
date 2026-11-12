@@ -1,0 +1,104 @@
+# codemagic.yaml
+# ─────────────────────────────────────────────────────────────────────────────
+# Workflow Codemagic : build GabaritScan iOS depuis Windows sans Mac.
+#
+# ÉTAPES :
+#   1. Crée un compte gratuit sur https://codemagic.io
+#   2. Connecte ton repo GitHub
+#   3. Codemagic détecte ce fichier automatiquement
+#   4. Lance le build → télécharge le .IPA
+#   5. Installe sur iPhone via AltServer (Windows)
+#
+# COMPTE GRATUIT CODEMAGIC :
+#   - 500 min/mois de build Mac gratuites (≈ 10 builds)
+#   - Pas de compte Apple Developer payant requis pour signer avec AltServer
+# ─────────────────────────────────────────────────────────────────────────────
+
+workflows:
+
+  # ── Build debug non signé (AltServer re-signe) ─────────────────────────────
+  ios-debug-altserver:
+    name: "GabaritScan — Debug pour AltServer"
+    max_build_duration: 60      # minutes
+
+    environment:
+      xcode: latest             # Xcode 15+ recommandé
+      cocoapods: default
+
+    scripts:
+      # 1. Cloner les sources AprilTag C (obligatoire pour le build)
+      - name: "Cloner AprilTag C"
+        script: |
+          git clone --depth=1 https://github.com/AprilRobotics/apriltag.git \
+            GabaritScan/Native/apriltag
+          echo "✅ AprilTag cloné"
+
+      # 2. Vérifier que Xcode voit le projet
+      - name: "Lister schémas Xcode"
+        script: |
+          xcodebuild -list -project GabaritScan.xcodeproj 2>/dev/null || \
+          xcodebuild -list -workspace GabaritScan.xcworkspace 2>/dev/null || \
+          echo "⚠️ Vérifier que GabaritScan.xcodeproj est dans le repo"
+
+      # 3. Build sans signature (pour AltServer)
+      - name: "Build IPA non signé"
+        script: |
+          xcodebuild \
+            -project GabaritScan.xcodeproj \
+            -scheme GabaritScan \
+            -configuration Debug \
+            -destination "generic/platform=iOS" \
+            -archivePath build/GabaritScan.xcarchive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            archive
+
+          # Exporter en IPA (sans signature)
+          xcodebuild \
+            -exportArchive \
+            -archivePath build/GabaritScan.xcarchive \
+            -exportPath build/ipa \
+            -exportOptionsPlist ExportOptions.plist
+
+    artifacts:
+      # Le fichier IPA à télécharger puis installer via AltServer
+      - build/ipa/*.ipa
+      - build/ipa/*.plist
+      # Logs de build si erreur
+      - /tmp/xcodebuild_logs/*.log
+
+    publishing:
+      # Notification par email quand le build est prêt
+      email:
+        recipients:
+          - ton@email.com        # ← Remplacer par ton email
+        notify:
+          success: true
+          failure: true
+
+
+  # ── Build Release signé (compte Developer payant $99/an) ───────────────────
+  # Décommenter quand tu auras un compte Apple Developer
+  #
+  # ios-release-testflight:
+  #   name: "GabaritScan — Release TestFlight"
+  #   environment:
+  #     xcode: latest
+  #     ios_signing:
+  #       distribution_type: app_store
+  #       bundle_identifier: com.gabaritscan.app
+  #   scripts:
+  #     - name: "Build signé"
+  #       script: |
+  #         xcode-project use-profiles
+  #         xcodebuild -scheme GabaritScan -archivePath build/GabaritScan.xcarchive archive
+  #         xcodebuild -exportArchive -archivePath build/GabaritScan.xcarchive \
+  #           -exportPath build/ipa -exportOptionsPlist ExportOptions.plist
+  #   artifacts:
+  #     - build/ipa/*.ipa
+  #   publishing:
+  #     app_store_connect:
+  #       api_key: $APP_STORE_CONNECT_API_KEY
+  #       key_id: $APP_STORE_CONNECT_KEY_ID
+      #       issuer_id: $APP_STORE_CONNECT_ISSUER_ID
