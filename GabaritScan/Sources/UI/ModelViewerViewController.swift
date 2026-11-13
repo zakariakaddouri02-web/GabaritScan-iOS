@@ -2,17 +2,19 @@ import UIKit
 import SceneKit
 import QuickLook
 
-// MARK: - Polycam-style 3D model viewer
+// MARK: - Polycam-style 3D model viewer avec Texture Réelle & Export GLB
 
 final class ModelViewerViewController: UIViewController {
 
     var modelScene: SCNScene?
-    var modelFileURL: URL?
+    var glbFileURL: URL?
+    var usdzFileURL: URL?
+    var modelFileURL: URL? // Pour compatibilité
 
     private var scnView: SCNView!
-    private var currentViewMode: ViewMode = .mesh
+    private var currentViewMode: ViewMode = .texture
 
-    private enum ViewMode { case mesh, points, axes }
+    private enum ViewMode { case texture, mesh, points }
     private enum PresetView { case orbit, front, top }
 
     // MARK: - Lifecycle
@@ -43,7 +45,6 @@ final class ModelViewerViewController: UIViewController {
             setupInitialCamera(scene: scene)
         }
 
-        // Soft ambient environment
         scnView.scene?.background.contents = UIColor(white: 0.03, alpha: 1)
         view.addSubview(scnView)
     }
@@ -53,9 +54,8 @@ final class ModelViewerViewController: UIViewController {
         cameraNode.name   = "ViewerCamera"
         cameraNode.camera = SCNCamera()
         cameraNode.camera?.fieldOfView = 60
-        // Isometric-ish view from above-front (Polycam default)
-        cameraNode.position    = SCNVector3(x: 0.20, y: 0.28, z: 0.45)
-        cameraNode.eulerAngles = SCNVector3(x: -0.55, y: 0.4, z: 0)
+        cameraNode.position    = SCNVector3(x: 0.18, y: 0.22, z: 0.42)
+        cameraNode.eulerAngles = SCNVector3(x: -0.48, y: 0.38, z: 0)
         scene.rootNode.addChildNode(cameraNode)
         scnView.pointOfView = cameraNode
     }
@@ -63,214 +63,226 @@ final class ModelViewerViewController: UIViewController {
     // MARK: - Top Bar
 
     private func setupTopBar() {
-        let headerView = UIView()
-        headerView.backgroundColor = UIColor(red: 0.102, green: 0.102, blue: 0.118, alpha: 0.95)
-        headerView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(headerView)
+        let bar = UIView()
+        bar.translatesAutoresizingMaskIntoConstraints = false
+        bar.backgroundColor = UIColor(red: 0.05, green: 0.05, blue: 0.06, alpha: 0.85)
+        view.addSubview(bar)
 
-        let titleLabel = UILabel()
-        titleLabel.text          = "GabaritScan 3D"
-        titleLabel.textColor     = .white
-        titleLabel.font          = UIFont.systemFont(ofSize: 17, weight: .semibold)
-        titleLabel.translatesAutoresizingMaskIntoConstraints = false
-        headerView.addSubview(titleLabel)
+        let backBtn = UIButton(type: .system)
+        backBtn.translatesAutoresizingMaskIntoConstraints = false
+        backBtn.setTitle("← Retour", for: .normal)
+        backBtn.setTitleColor(.white, for: .normal)
+        backBtn.titleLabel?.font = .systemFont(ofSize: 16, weight: .semibold)
+        backBtn.addTarget(self, action: #selector(onClose), for: .touchUpInside)
+        bar.addSubview(backBtn)
 
-        let closeBtn = UIButton(type: .system)
-        closeBtn.setTitle("← Retour", for: .normal)
-        closeBtn.setTitleColor(.white, for: .normal)
-        closeBtn.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .medium)
-        closeBtn.addTarget(self, action: #selector(onClose), for: .touchUpInside)
-        closeBtn.translatesAutoresizingMaskIntoConstraints = false
-        headerView.addSubview(closeBtn)
+        let titleLbl = UILabel()
+        titleLbl.translatesAutoresizingMaskIntoConstraints = false
+        titleLbl.text = "Gabarit 3D (GLB Texturé)"
+        titleLbl.textColor = .white
+        titleLbl.font = .systemFont(ofSize: 16, weight: .bold)
+        bar.addSubview(titleLbl)
 
         let exportBtn = UIButton(type: .system)
-        exportBtn.setTitle("Exporter ↑", for: .normal)
-        exportBtn.setTitleColor(UIColor(red: 0.0, green: 0.898, blue: 0.816, alpha: 1.0), for: .normal)
-        exportBtn.titleLabel?.font = UIFont.systemFont(ofSize: 16, weight: .semibold)
-        exportBtn.addTarget(self, action: #selector(onShare), for: .touchUpInside)
         exportBtn.translatesAutoresizingMaskIntoConstraints = false
-        headerView.addSubview(exportBtn)
+        exportBtn.setTitle("Exporter GLB 📤", for: .normal)
+        exportBtn.setTitleColor(UIColor(red: 0.0, green: 0.898, blue: 0.816, alpha: 1), for: .normal)
+        exportBtn.titleLabel?.font = .systemFont(ofSize: 15, weight: .bold)
+        exportBtn.addTarget(self, action: #selector(onShare), for: .touchUpInside)
+        bar.addSubview(exportBtn)
 
         NSLayoutConstraint.activate([
-            headerView.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
-            headerView.leadingAnchor.constraint(equalTo: view.leadingAnchor),
-            headerView.trailingAnchor.constraint(equalTo: view.trailingAnchor),
-            headerView.heightAnchor.constraint(equalToConstant: 50),
+            bar.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor),
+            bar.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bar.heightAnchor.constraint(equalToConstant: 48),
 
-            closeBtn.leadingAnchor.constraint(equalTo: headerView.leadingAnchor, constant: 16),
-            closeBtn.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
+            backBtn.leadingAnchor.constraint(equalTo: bar.leadingAnchor, constant: 16),
+            backBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
 
-            titleLabel.centerXAnchor.constraint(equalTo: headerView.centerXAnchor),
-            titleLabel.centerYAnchor.constraint(equalTo: headerView.centerYAnchor),
+            titleLbl.centerXAnchor.constraint(equalTo: bar.centerXAnchor),
+            titleLbl.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
 
-            exportBtn.trailingAnchor.constraint(equalTo: headerView.trailingAnchor, constant: -16),
-            exportBtn.centerYAnchor.constraint(equalTo: headerView.centerYAnchor)
+            exportBtn.trailingAnchor.constraint(equalTo: bar.trailingAnchor, constant: -16),
+            exportBtn.centerYAnchor.constraint(equalTo: bar.centerYAnchor),
         ])
     }
 
-    // MARK: - Bottom Toolbar (orbit presets)
+    // MARK: - Bottom Preset View Toolbar
 
     private func setupBottomToolbar() {
-        let toolbar = UIView()
-        toolbar.backgroundColor   = UIColor(red: 0.102, green: 0.102, blue: 0.118, alpha: 0.95)
-        toolbar.layer.cornerRadius = 20
-        toolbar.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(toolbar)
+        let pill = UIView()
+        pill.translatesAutoresizingMaskIntoConstraints = false
+        pill.backgroundColor = UIColor(red: 0.102, green: 0.102, blue: 0.118, alpha: 0.95)
+        pill.layer.cornerRadius = 20
+        pill.clipsToBounds = true
+        view.addSubview(pill)
 
-        let orbitBtn = makePresetButton(title: "⟲ Orbite", tag: 0)
-        let frontBtn = makePresetButton(title: "⊡ Face",   tag: 1)
-        let topBtn   = makePresetButton(title: "↑ Dessus", tag: 2)
+        let orbitBtn = makeToolbarButton(title: "⟲ Orbite", action: #selector(onOrbit))
+        let frontBtn = makeToolbarButton(title: "⊡ Face",   action: #selector(onFront))
+        let topBtn   = makeToolbarButton(title: "↑ Dessus", action: #selector(onTop))
 
         let stack = UIStackView(arrangedSubviews: [orbitBtn, frontBtn, topBtn])
-        stack.axis         = .horizontal
-        stack.distribution = .fillEqually
-        stack.spacing      = 8
         stack.translatesAutoresizingMaskIntoConstraints = false
-        toolbar.addSubview(stack)
+        stack.distribution = .fillEqually
+        stack.spacing = 2
+        pill.addSubview(stack)
 
         NSLayoutConstraint.activate([
-            toolbar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -56),
-            toolbar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            toolbar.widthAnchor.constraint(equalToConstant: 300),
-            toolbar.heightAnchor.constraint(equalToConstant: 44),
+            pill.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            pill.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -16),
+            pill.heightAnchor.constraint(equalToConstant: 42),
+            pill.widthAnchor.constraint(equalToConstant: 270),
 
-            stack.topAnchor.constraint(equalTo: toolbar.topAnchor, constant: 4),
-            stack.leadingAnchor.constraint(equalTo: toolbar.leadingAnchor, constant: 8),
-            stack.trailingAnchor.constraint(equalTo: toolbar.trailingAnchor, constant: -8),
-            stack.bottomAnchor.constraint(equalTo: toolbar.bottomAnchor, constant: -4)
+            stack.topAnchor.constraint(equalTo: pill.topAnchor, constant: 3),
+            stack.bottomAnchor.constraint(equalTo: pill.bottomAnchor, constant: -3),
+            stack.leadingAnchor.constraint(equalTo: pill.leadingAnchor, constant: 4),
+            stack.trailingAnchor.constraint(equalTo: pill.trailingAnchor, constant: -4),
         ])
     }
 
-    // MARK: - View Mode Toggle (Mesh / Points / Axes)
-
-    private func setupViewModeToggle() {
-        let toggleBar = UIView()
-        toggleBar.backgroundColor   = UIColor(red: 0.102, green: 0.102, blue: 0.118, alpha: 0.95)
-        toggleBar.layer.cornerRadius = 16
-        toggleBar.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(toggleBar)
-
-        let meshBtn   = makeModeButton(title: "Mesh",   tag: 10)
-        let pointsBtn = makeModeButton(title: "Points", tag: 11)
-        let axesBtn   = makeModeButton(title: "Axes",   tag: 12)
-
-        let stack = UIStackView(arrangedSubviews: [meshBtn, pointsBtn, axesBtn])
-        stack.axis         = .horizontal
-        stack.distribution = .fillEqually
-        stack.spacing      = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        toggleBar.addSubview(stack)
-
-        NSLayoutConstraint.activate([
-            toggleBar.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -8),
-            toggleBar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            toggleBar.widthAnchor.constraint(equalToConstant: 240),
-            toggleBar.heightAnchor.constraint(equalToConstant: 36),
-
-            stack.topAnchor.constraint(equalTo: toggleBar.topAnchor, constant: 4),
-            stack.leadingAnchor.constraint(equalTo: toggleBar.leadingAnchor, constant: 6),
-            stack.trailingAnchor.constraint(equalTo: toggleBar.trailingAnchor, constant: -6),
-            stack.bottomAnchor.constraint(equalTo: toggleBar.bottomAnchor, constant: -4)
-        ])
-    }
-
-    // MARK: - Button factories
-
-    private func makePresetButton(title: String, tag: Int) -> UIButton {
+    private func makeToolbarButton(title: String, action: Selector) -> UIButton {
         let btn = UIButton(type: .system)
         btn.setTitle(title, for: .normal)
         btn.setTitleColor(.white, for: .normal)
-        btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .semibold)
-        btn.backgroundColor  = UIColor(white: 0.2, alpha: 0.8)
-        btn.layer.cornerRadius = 10
-        btn.tag = tag
-        btn.addTarget(self, action: #selector(onPresetTapped(_:)), for: .touchUpInside)
+        btn.titleLabel?.font = .systemFont(ofSize: 13, weight: .medium)
+        btn.addTarget(self, action: action, for: .touchUpInside)
         return btn
     }
 
-    private func makeModeButton(title: String, tag: Int) -> UIButton {
+    // MARK: - View Mode Toggle ([Texture] [Mesh] [Points])
+
+    private var modeButtons: [UIButton] = []
+
+    private func setupViewModeToggle() {
+        let toggle = UIView()
+        toggle.translatesAutoresizingMaskIntoConstraints = false
+        toggle.backgroundColor = UIColor(white: 0.15, alpha: 0.8)
+        toggle.layer.cornerRadius = 14
+        toggle.clipsToBounds = true
+        view.addSubview(toggle)
+
+        let texBtn   = makeModeButton(title: "Texture", mode: .texture)
+        let meshBtn  = makeModeButton(title: "Mesh",    mode: .mesh)
+        let ptsBtn   = makeModeButton(title: "Points",  mode: .points)
+
+        modeButtons = [texBtn, meshBtn, ptsBtn]
+        updateModeButtonHighlight(activeMode: .texture)
+
+        let stack = UIStackView(arrangedSubviews: [texBtn, meshBtn, ptsBtn])
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        stack.distribution = .fillEqually
+        stack.spacing = 2
+        toggle.addSubview(stack)
+
+        NSLayoutConstraint.activate([
+            toggle.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            toggle.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -66),
+            toggle.heightAnchor.constraint(equalToConstant: 32),
+            toggle.widthAnchor.constraint(equalToConstant: 240),
+
+            stack.topAnchor.constraint(equalTo: toggle.topAnchor, constant: 2),
+            stack.bottomAnchor.constraint(equalTo: toggle.bottomAnchor, constant: -2),
+            stack.leadingAnchor.constraint(equalTo: toggle.leadingAnchor, constant: 2),
+            stack.trailingAnchor.constraint(equalTo: toggle.trailingAnchor, constant: -2),
+        ])
+    }
+
+    private func makeModeButton(title: String, mode: ViewMode) -> UIButton {
         let btn = UIButton(type: .system)
         btn.setTitle(title, for: .normal)
-        btn.setTitleColor(UIColor(white: 0.75, alpha: 1), for: .normal)
-        btn.titleLabel?.font = UIFont.systemFont(ofSize: 13, weight: .medium)
-        btn.backgroundColor  = UIColor(white: 0.15, alpha: 0.8)
-        btn.layer.cornerRadius = 8
-        btn.tag = tag
-        btn.addTarget(self, action: #selector(onModeTapped(_:)), for: .touchUpInside)
+        btn.titleLabel?.font = .systemFont(ofSize: 12, weight: .bold)
+        btn.layer.cornerRadius = 12
+        btn.tag = (mode == .texture ? 0 : (mode == .mesh ? 1 : 2))
+        btn.addTarget(self, action: #selector(onModeSelected(_:)), for: .touchUpInside)
         return btn
     }
 
-    // MARK: - Preset view actions
-
-    @objc private func onPresetTapped(_ sender: UIButton) {
-        guard let cam = scnView.pointOfView else { return }
-        SCNTransaction.begin()
-        SCNTransaction.animationDuration = 0.5
-        switch sender.tag {
-        case 0: // Orbite
-            cam.position    = SCNVector3(x: 0.20, y: 0.28, z: 0.45)
-            cam.eulerAngles = SCNVector3(x: -0.55, y: 0.4, z: 0)
-        case 1: // Face
-            cam.position    = SCNVector3(x: 0, y: 0.08, z: 0.5)
-            cam.eulerAngles = SCNVector3(x: 0, y: 0, z: 0)
-        case 2: // Dessus
-            cam.position    = SCNVector3(x: 0, y: 0.6, z: 0.001)
-            cam.eulerAngles = SCNVector3(x: -.pi / 2, y: 0, z: 0)
-        default: break
+    @objc private func onModeSelected(_ sender: UIButton) {
+        let mode: ViewMode = sender.tag == 0 ? .texture : (sender.tag == 1 ? .mesh : .points)
+        currentViewMode = mode
+        updateModeButtonHighlight(activeMode: mode)
+        if let scene = scnView.scene {
+            setRenderingMode(mode, scene: scene)
         }
-        SCNTransaction.commit()
     }
 
-    // MARK: - View mode actions
-
-    @objc private func onModeTapped(_ sender: UIButton) {
-        guard let scene = scnView.scene else { return }
-
-        switch sender.tag {
-        case 10: // Mesh — apply matcap material to all mesh nodes
-            setRenderingMode(.mesh, scene: scene)
-            currentViewMode = .mesh
-        case 11: // Points
-            setRenderingMode(.points, scene: scene)
-            currentViewMode = .points
-        case 12: // Axes only
-            setRenderingMode(.axes, scene: scene)
-            currentViewMode = .axes
-        default: break
+    private func updateModeButtonHighlight(activeMode: ViewMode) {
+        let activeTag = (activeMode == .texture ? 0 : (activeMode == .mesh ? 1 : 2))
+        for btn in modeButtons {
+            if btn.tag == activeTag {
+                btn.backgroundColor = UIColor(red: 0.0, green: 0.898, blue: 0.816, alpha: 1)
+                btn.setTitleColor(.black, for: .normal)
+            } else {
+                btn.backgroundColor = .clear
+                btn.setTitleColor(UIColor(white: 0.7, alpha: 1), for: .normal)
+            }
         }
+    }
+
+    // MARK: - Camera Presets
+
+    @objc private func onOrbit() { applyCameraPreset(.orbit) }
+    @objc private func onFront() { applyCameraPreset(.front) }
+    @objc private func onTop()   { applyCameraPreset(.top)   }
+
+    private func applyCameraPreset(_ preset: PresetView) {
+        guard let camNode = scnView.pointOfView else { return }
+        SCNTransaction.begin()
+        SCNTransaction.animationDuration = 0.5
+        SCNTransaction.animationTimingFunction = CAMediaTimingFunction(name: .easeInEaseOut)
+        switch preset {
+        case .orbit:
+            camNode.position    = SCNVector3(x: 0.18, y: 0.22, z: 0.42)
+            camNode.eulerAngles = SCNVector3(x: -0.48, y: 0.38, z: 0)
+        case .front:
+            camNode.position    = SCNVector3(x: 0, y: 0.08, z: 0.45)
+            camNode.eulerAngles = SCNVector3(x: 0, y: 0, z: 0)
+        case .top:
+            camNode.position    = SCNVector3(x: 0, y: 0.55, z: 0.001)
+            camNode.eulerAngles = SCNVector3(x: -.pi / 2.0, y: 0, z: 0)
+        }
+        SCNTransaction.commit()
     }
 
     private func setRenderingMode(_ mode: ViewMode, scene: SCNScene) {
         scene.rootNode.enumerateChildNodes { node, _ in
             guard let geo = node.geometry else { return }
             switch mode {
+            case .texture:
+                // Texture réelle originale
+                geo.materials.first?.fillMode = .fill
             case .mesh:
-                // Reapply matcap material
+                // Matcap shading
                 let mat = SCNGeometry.matcapMaterial()
                 geo.materials = [mat]
             case .points:
-                // Wireframe-like: use fillMode lines if available, else just tint
+                // Wireframe / Nuage de points
                 let mat = SCNMaterial()
                 mat.diffuse.contents = UIColor(red: 0.0, green: 0.898, blue: 0.816, alpha: 1.0)
                 mat.fillMode = .lines
-                geo.materials = [mat]
-            case .axes:
-                // Semi-transparent grey
-                let mat = SCNMaterial()
-                mat.diffuse.contents = UIColor(white: 0.5, alpha: 0.3)
-                mat.isDoubleSided = true
                 geo.materials = [mat]
             }
         }
     }
 
-    // MARK: - Navigation
+    // MARK: - Navigation & Export
 
     @objc private func onClose() { dismiss(animated: true) }
 
     @objc private func onShare() {
-        guard let url = modelFileURL else { return }
-        let activityVC = UIActivityViewController(activityItems: [url], applicationActivities: nil)
+        // Exporte en priorité le fichier .glb (ou usdz en fallback)
+        var itemsToShare: [Any] = []
+        if let glb = glbFileURL {
+            itemsToShare.append(glb)
+        }
+        if let usdz = usdzFileURL ?? modelFileURL {
+            itemsToShare.append(usdz)
+        }
+
+        guard !itemsToShare.isEmpty else { return }
+
+        let activityVC = UIActivityViewController(activityItems: itemsToShare, applicationActivities: nil)
         if let popover = activityVC.popoverPresentationController {
             popover.sourceView = view
             popover.sourceRect = CGRect(x: view.bounds.midX, y: 100, width: 0, height: 0)

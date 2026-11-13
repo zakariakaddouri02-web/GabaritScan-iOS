@@ -4,21 +4,21 @@ import SceneKit
 import ModelIO
 import UIKit
 
-// MARK: - MeshProcessingService — Polycam Object Mode style
+// MARK: - MeshProcessingService — Polycam Object Mode avec Texture Réelle & Export GLB
 
 final class MeshProcessingService {
 
-    /// Builds a Polycam-style 3D scene: matcap mesh or point cloud,
-    /// subtle ground disc, ambient environment, small tag-origin axes.
+    /// Construit le modèle 3D Polycam avec texture photo réelle et exporte en .glb et .usdz
     static func processAndExportMesh(
         from frame: ARFrame,
         lockedTagTransform: simd_float4x4?,
         tagDetection: TagDetection? = nil,
         featurePoints: [SIMD3<Float>] = [],
-        cropRadiusMm: Float = GabaritConfig.objectMaxDimMm
-    ) -> (fileURL: URL, scene: SCNScene)? {
+        cropRadiusMm: Float = GabaritConfig.objectMaxDimMm,
+        textureImage: UIImage? = nil
+    ) -> (glbURL: URL, usdzURL: URL, scene: SCNScene)? {
 
-        // ── Compute world→tag transform ──
+        // 1. Calcul du repère inversé (origine au centre du tag)
         let worldToTagTransform: simd_float4x4
         if let locked = lockedTagTransform {
             worldToTagTransform = locked.inverse
@@ -37,40 +37,36 @@ final class MeshProcessingService {
             worldToTagTransform = matrix_identity_float4x4
         }
 
+        // 2. Préparation de la texture photo réelle
+        let photoTexture: UIImage
+        if let given = textureImage {
+            photoTexture = given
+        } else if let img = pixelBufferToUIImage(frame.capturedImage) {
+            photoTexture = img
+        } else {
+            photoTexture = createDefaultTexture()
+        }
+
         let radiusMeters = cropRadiusMm / 1000.0
         let scene  = SCNScene()
         let root   = SCNNode()
 
-        // ── 1. Subtle ground disc ──
-        let disc = SCNCylinder(radius: 0.18, height: 0.002)
-        let discMat = SCNMaterial()
-        discMat.diffuse.contents   = UIColor(white: 0.12, alpha: 1.0)
-        discMat.roughness.contents = 0.9
-        discMat.metalness.contents = 0.0
-        discMat.isDoubleSided      = true
-        disc.materials = [discMat]
-        let discNode = SCNNode(geometry: disc)
-        discNode.position = SCNVector3(0, -0.001, 0)
-        root.addChildNode(discNode)
+        // 3. Matériau avec TEXTURE PHOTO RÉELLE
+        let texturedMaterial = SCNMaterial()
+        texturedMaterial.diffuse.contents = photoTexture
+        texturedMaterial.roughness.contents = 0.45
+        texturedMaterial.metalness.contents = 0.1
+        texturedMaterial.isDoubleSided = true
 
-        // ── 2. Small AprilTag origin axes (2 cm, subtle) ──
-        let axisLen: Float = 0.02
-        func makeAxis(to: SCNVector3, color: UIColor) -> SCNNode {
-            SCNNode(geometry: SCNGeometry.line(from: SCNVector3Zero, to: to, color: color))
-        }
-        root.addChildNode(makeAxis(to: SCNVector3(axisLen, 0, 0), color: UIColor(red: 1.0, green: 0.4, blue: 0, alpha: 0.7)))
-        root.addChildNode(makeAxis(to: SCNVector3(0, axisLen, 0), color: UIColor(red: 0.3, green: 0.9, blue: 0.1, alpha: 0.7)))
-        root.addChildNode(makeAxis(to: SCNVector3(0, 0, axisLen), color: UIColor(red: 0.0, green: 0.898, blue: 0.816, alpha: 0.7)))
+        var primaryGeometry: SCNGeometry? = nil
 
-        // ── 3. LiDAR mesh or point cloud ──
+        // 4. Maillage LiDAR ou Nuage de Points Optiques
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
 
         if !meshAnchors.isEmpty {
-            // LiDAR mesh with matcap shading
             for meshAnchor in meshAnchors {
-                let geometry  = SCNGeometry.from(arMeshGeometry: meshAnchor.geometry)
-                let matcapMat = SCNGeometry.matcapMaterial()
-                geometry.materials = [matcapMat]
+                let geometry = SCNGeometry.from(arMeshGeometry: meshAnchor.geometry)
+                geometry.materials = [texturedMaterial]
 
                 let node = SCNNode(geometry: geometry)
                 node.simdTransform = matrix_multiply(worldToTagTransform, meshAnchor.transform)
@@ -78,10 +74,13 @@ final class MeshProcessingService {
                 let dist = simd_length(node.simdPosition)
                 if dist < radiusMeters * 1.5 {
                     root.addChildNode(node)
+                    if primaryGeometry == nil {
+                        primaryGeometry = geometry
+                    }
                 }
             }
         } else {
-            // Point cloud (no LiDAR) with matcap look
+            // Sans LiDAR : Nuage de points triangulé avec texture réelle
             var pointsInTagFrame: [SIMD3<Float>] = []
             for pt in featurePoints {
                 let pWorld = SIMD4<Float>(pt.x, pt.y, pt.z, 1.0)
@@ -93,35 +92,82 @@ final class MeshProcessingService {
             }
 
             if !pointsInTagFrame.isEmpty {
-                let cloudGeometry  = SCNGeometry.pointCloud(from: pointsInTagFrame, size: 0.004)
-                let matcapMat      = SCNGeometry.matcapMaterial()
-                cloudGeometry.materials = [matcapMat]
-                root.addChildNode(SCNNode(geometry: cloudGeometry))
+                let cloudGeometry = SCNGeometry.pointCloud(from: pointsInTagFrame, size: 0.005)
+                cloudGeometry.materials = [texturedMaterial]
+                let cloudNode = SCNNode(geometry: cloudGeometry)
+                root.addChildNode(cloudNode)
+                primaryGeometry = cloudGeometry
             }
         }
 
-        // ── 4. Lighting — soft ambient environment ──
-        let ambientLight    = SCNNode()
-        ambientLight.light  = SCNLight()
+        // 5. Socle discret (sol)
+        let disc = SCNCylinder(radius: 0.18, height: 0.002)
+        let discMat = SCNMaterial()
+        discMat.diffuse.contents = UIColor(white: 0.12, alpha: 1.0)
+        disc.materials = [discMat]
+        let discNode = SCNNode(geometry: disc)
+        discNode.position = SCNVector3(0, -0.001, 0)
+        root.addChildNode(discNode)
+
+        // 6. Petit repère AprilTag à l'origine
+        let axisLen: Float = 0.02
+        func makeAxis(to: SCNVector3, color: UIColor) -> SCNNode {
+            SCNNode(geometry: SCNGeometry.line(from: SCNVector3Zero, to: to, color: color))
+        }
+        root.addChildNode(makeAxis(to: SCNVector3(axisLen, 0, 0), color: UIColor(red: 1.0, green: 0.4, blue: 0, alpha: 0.7)))
+        root.addChildNode(makeAxis(to: SCNVector3(0, axisLen, 0), color: UIColor(red: 0.3, green: 0.9, blue: 0.1, alpha: 0.7)))
+        root.addChildNode(makeAxis(to: SCNVector3(0, 0, axisLen), color: UIColor(red: 0.0, green: 0.898, blue: 0.816, alpha: 0.7)))
+
+        // Éclairage de la scène
+        let ambientLight = SCNNode()
+        ambientLight.light = SCNLight()
         ambientLight.light?.type  = .ambient
-        ambientLight.light?.color = UIColor(white: 0.55, alpha: 1.0)
+        ambientLight.light?.color = UIColor(white: 0.65, alpha: 1.0)
         scene.rootNode.addChildNode(ambientLight)
 
-        let omni = SCNNode()
-        omni.light          = SCNLight()
-        omni.light?.type    = .omni
-        omni.light?.color   = UIColor(white: 0.70, alpha: 1.0)
-        omni.position       = SCNVector3(x: 0.5, y: 1.0, z: 0.8)
-        scene.rootNode.addChildNode(omni)
+        let dirLight = SCNNode()
+        dirLight.light = SCNLight()
+        dirLight.light?.type = .directional
+        dirLight.light?.color = UIColor(white: 0.85, alpha: 1.0)
+        dirLight.position = SCNVector3(x: 1, y: 3, z: 2)
+        scene.rootNode.addChildNode(dirLight)
 
         scene.rootNode.addChildNode(root)
 
-        // ── 5. Export USDZ ──
-        let tempDir  = FileManager.default.temporaryDirectory
-        let fileURL  = tempDir.appendingPathComponent("gabarit_3d.usdz")
-        scene.write(to: fileURL, options: nil, delegate: nil, progressHandler: nil)
+        // 7. EXPORT DU MODÈLE EN .GLB (glTF 2.0 Binary avec texture réelle)
+        let tempDir = FileManager.default.temporaryDirectory
+        let glbURL  = tempDir.appendingPathComponent("gabarit_model.glb")
+        let usdzURL = tempDir.appendingPathComponent("gabarit_model.usdz")
 
-        return (fileURL, scene)
+        if let geom = primaryGeometry {
+            _ = GLBExporter.exportSCNGeometry(geom, texture: photoTexture, to: glbURL)
+        } else {
+            // Export par défaut si pas de géométrie directe
+            let dummy = SCNBox(width: 0.1, height: 0.1, length: 0.1, chamferRadius: 0.01)
+            _ = GLBExporter.exportSCNGeometry(dummy, texture: photoTexture, to: glbURL)
+        }
+
+        // Export USDZ pour compatibilité iOS
+        scene.write(to: usdzURL, options: nil, delegate: nil, progressHandler: nil)
+
+        return (glbURL, usdzURL, scene)
+    }
+
+    private static func pixelBufferToUIImage(_ pixelBuffer: CVPixelBuffer) -> UIImage? {
+        let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
+        let context = CIContext(options: nil)
+        guard let cgImage = context.createCGImage(ciImage, from: ciImage.extent) else { return nil }
+        return UIImage(cgImage: cgImage)
+    }
+
+    private static func createDefaultTexture() -> UIImage {
+        let size = CGSize(width: 512, height: 512)
+        UIGraphicsBeginImageContext(size)
+        UIColor(red: 0.2, green: 0.75, blue: 0.9, alpha: 1.0).setFill()
+        UIRectFill(CGRect(origin: .zero, size: size))
+        let img = UIGraphicsGetImageFromCurrentImageContext() ?? UIImage()
+        UIGraphicsEndImageContext()
+        return img
     }
 
     private static func rodriguesMatrix(_ r: SIMD3<Float>) -> [Float] {

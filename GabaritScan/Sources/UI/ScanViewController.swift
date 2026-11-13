@@ -540,10 +540,12 @@ final class ScanViewController: UIViewController {
             )
             DispatchQueue.main.async {
                 alert.dismiss(animated: true) {
-                    guard let (fileURL, scene) = result else { return }
+                    guard let (glbURL, usdzURL, scene) = result else { return }
                     let viewerVC = ModelViewerViewController()
                     viewerVC.modelScene = scene
-                    viewerVC.modelFileURL = fileURL
+                    viewerVC.glbFileURL = glbURL
+                    viewerVC.usdzFileURL = usdzURL
+                    viewerVC.modelFileURL = glbURL
                     viewerVC.modalPresentationStyle = .fullScreen
                     self.present(viewerVC, animated: true)
                 }
