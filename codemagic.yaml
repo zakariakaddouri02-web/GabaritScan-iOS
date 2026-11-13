@@ -9,12 +9,23 @@ workflows:
       cocoapods: default
 
     scripts:
-      # 1. Cloner les sources AprilTag C
-      - name: "Cloner AprilTag C"
+      # 1. Cloner AprilTag C et nettoyer les fichiers inutiles (tests, demos, python, cmake)
+      - name: "Cloner et nettoyer AprilTag C"
         script: |
           rm -rf GabaritScan/Native/apriltag
           git clone --depth=1 https://github.com/AprilRobotics/apriltag.git GabaritScan/Native/apriltag
-          echo "✅ AprilTag cloné"
+          
+          # Nettoyage des dossiers et fichiers incompatibles avec iOS / compilation C pure
+          rm -rf GabaritScan/Native/apriltag/test
+          rm -rf GabaritScan/Native/apriltag/example
+          rm -rf GabaritScan/Native/apriltag/gui
+          find GabaritScan/Native/apriltag -name "CMakeLists.txt" -delete
+          find GabaritScan/Native/apriltag -name "*.cmake" -delete
+          find GabaritScan/Native/apriltag -name "*demo*" -delete
+          find GabaritScan/Native/apriltag -name "*python*" -delete
+          find GabaritScan/Native/apriltag -name "*_py_*" -delete
+          find GabaritScan/Native/apriltag -name "*.py" -delete
+          echo "✅ AprilTag cloné et nettoyé"
 
       # 2. Générer le fichier .xcodeproj avec XcodeGen
       - name: "Générer Xcode project via XcodeGen"

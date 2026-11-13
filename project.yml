@@ -17,6 +17,15 @@ targets:
         excludes:
           - "**/*.md"
           - "**/.git*"
+          - "**/CMakeLists.txt"
+          - "**/*.cmake"
+          - "**/Makefile"
+          - "**/test/**"
+          - "**/example/**"
+          - "**/gui/**"
+          - "**/*demo*"
+          - "**/*python*"
+          - "**/*py*"
       - path: GabaritScan/Resources
     settings:
       base:
