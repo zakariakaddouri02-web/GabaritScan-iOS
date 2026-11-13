@@ -48,13 +48,11 @@ final class ScanViewController: UIViewController {
     // MARK: - Callbacks ViewModel
 
     private func setupCallbacks() {
-        // Animation flash & vibration à chaque capture automatique
         viewModel.onPhotoCaptured = { [weak self] in
             guard let self = self else { return }
             self.triggerFlashAnimation()
         }
 
-        // Quand le scan est complet (24 vues)
         viewModel.onScanCompleted = { [weak self] in
             guard let self = self else { return }
             self.onGenerate3D()
@@ -113,7 +111,6 @@ final class ScanViewController: UIViewController {
     // MARK: - UI Setup
 
     private func setupUI() {
-        // Flash visuel pour l'auto-capture
         flashView = UIView(frame: view.bounds)
         flashView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         flashView.backgroundColor = UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0)
@@ -155,13 +152,12 @@ final class ScanViewController: UIViewController {
         view.addSubview(progressBar)
 
         progressLbl = UILabel()
-        progressLbl.text = "0 / 24 vues (Auto-Capture Active 📸)"
+        progressLbl.text = "0 / 24 vues (Auto 📸)"
         progressLbl.textColor = .white
         progressLbl.font = .systemFont(ofSize: 14, weight: .semibold)
         progressLbl.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(progressLbl)
 
-        // Bouton de capture manuelle
         captureBtn = UIButton(type: .custom)
         captureBtn.backgroundColor = .white
         captureBtn.layer.cornerRadius = 35
@@ -171,7 +167,6 @@ final class ScanViewController: UIViewController {
         captureBtn.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(captureBtn)
 
-        // Bouton Générer 3D
         generate3DBtn = UIButton(type: .system)
         generate3DBtn.setTitle("Générer 3D 🎲", for: .normal)
         generate3DBtn.setTitleColor(.black, for: .normal)
@@ -221,12 +216,8 @@ final class ScanViewController: UIViewController {
     // MARK: - Génération et Visualisation 3D
 
     @objc private func onGenerate3D() {
-        guard let currentFrame = sceneView.session.currentFrame else {
-            print("⚠️ Aucune frame disponible pour générer la 3D")
-            return
-        }
+        guard let currentFrame = sceneView.session.currentFrame else { return }
 
-        // Afficher un indicateur d'activité
         let alert = UIAlertController(title: "Traitement 3D...", message: "Alignement sur l'AprilTag et création du modèle...", preferredStyle: .alert)
         present(alert, animated: true)
 
@@ -241,13 +232,12 @@ final class ScanViewController: UIViewController {
             DispatchQueue.main.async {
                 alert.dismiss(animated: true) {
                     guard let (fileURL, scene) = result else {
-                        let errAlert = UIAlertController(title: "Attention", message: "Aucun maillage 3D n'a encore été détecté. Bougez légèrement autour de l'objet pour scanner.", preferredStyle: .alert)
+                        let errAlert = UIAlertController(title: "Attention", message: "Aucun maillage 3D n'a encore été détecté. Bougez autour de l'objet pour scanner.", preferredStyle: .alert)
                         errAlert.addAction(UIAlertAction(title: "OK", style: .default))
                         self.present(errAlert, animated: true)
                         return
                     }
 
-                    // Ouvrir le visualiseur 3D interactif dans l'application !
                     let viewerVC = ModelViewerViewController()
                     viewerVC.modelScene = scene
                     viewerVC.modelFileURL = fileURL
@@ -271,17 +261,17 @@ final class ScanViewController: UIViewController {
     }
 }
 
-// MARK: - ARSCNViewDelegate (Maillage LiDAR temps réel)
+// MARK: - ARSCNViewDelegate
 
 extension ScanViewController: ARSCNViewDelegate {
 
     func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
         guard let meshAnchor = anchor as? ARMeshAnchor else { return nil }
 
-        let geometry = SCNGeometry(arMeshGeometry: meshAnchor.geometry)
+        let geometry = SCNGeometry.from(arMeshGeometry: meshAnchor.geometry)
         let material = SCNMaterial()
         material.diffuse.contents = UIColor(red: 0.1, green: 0.65, blue: 1.0, alpha: 0.35)
-        material.fillMode = .lines // Grillage Wireframe 3D
+        material.fillMode = .lines
         geometry.materials = [material]
 
         let node = SCNNode(geometry: geometry)
@@ -290,7 +280,7 @@ extension ScanViewController: ARSCNViewDelegate {
 
     func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
         guard let meshAnchor = anchor as? ARMeshAnchor else { return }
-        let geometry = SCNGeometry(arMeshGeometry: meshAnchor.geometry)
+        let geometry = SCNGeometry.from(arMeshGeometry: meshAnchor.geometry)
         let material = SCNMaterial()
         material.diffuse.contents = UIColor(red: 0.1, green: 0.65, blue: 1.0, alpha: 0.35)
         material.fillMode = .lines

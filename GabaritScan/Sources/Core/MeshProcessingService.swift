@@ -9,16 +9,15 @@ final class MeshProcessingService {
     /// Reconstruit le modèle 3D du gabarit à partir des données LiDAR et du tag
     /// - Parameters:
     ///   - frame: La dernière frame ARKit
-    ///   - tagTransform: Matrice 4x4 de la pose du tag dans le monde ARKit
+    ///   - tagDetection: Détection de l'AprilTag pour centrer l'origine
     ///   - cropRadiusMm: Rayon autour du tag à conserver (en mm)
-    /// - Returns: URL du fichier 3D généré (.usdz / .obj) et le SCNNode pour affichage direct
+    /// - Returns: URL du fichier 3D généré (.usdz) et la scène SCNScene pour affichage direct
     static func processAndExportMesh(
         from frame: ARFrame,
         tagDetection: TagDetection?,
         cropRadiusMm: Float = GabaritConfig.objectMaxDimMm
     ) -> (fileURL: URL, scene: SCNScene)? {
 
-        // 1. Récupérer tous les ancres de maillage LiDAR
         let meshAnchors = frame.anchors.compactMap { $0 as? ARMeshAnchor }
         guard !meshAnchors.isEmpty else {
             print("⚠️ Aucun maillage LiDAR disponible")
@@ -28,12 +27,10 @@ final class MeshProcessingService {
         // Matrice inverse du tag (pour ramener le repère (0,0,0) au centre du tag)
         let worldToTagTransform: simd_float4x4
         if let tag = tagDetection {
-            // Matrice caméra dans le monde ARKit
             let cameraToWorld = frame.camera.transform
-            // Transformation tag -> caméra
             let R = rodriguesMatrix(tag.rvec)
             let t = tag.tvec / 1000.0 // mm vers mètres pour ARKit
-            var tagToCamera = simd_float4x4(
+            let tagToCamera = simd_float4x4(
                 SIMD4(R[0], R[3], R[6], 0),
                 SIMD4(R[1], R[4], R[7], 0),
                 SIMD4(R[2], R[5], R[8], 0),
@@ -50,9 +47,8 @@ final class MeshProcessingService {
 
         // 2. Fusionner et recadrer les morceaux de maillage autour du tag
         for meshAnchor in meshAnchors {
-            let geometry = SCNGeometry(arMeshGeometry: meshAnchor.geometry)
+            let geometry = SCNGeometry.from(arMeshGeometry: meshAnchor.geometry)
 
-            // Matériau réaliste pour la visualisation
             let material = SCNMaterial()
             material.diffuse.contents = UIColor(red: 0.85, green: 0.85, blue: 0.88, alpha: 1.0)
             material.roughness.contents = 0.4
@@ -61,10 +57,8 @@ final class MeshProcessingService {
             geometry.materials = [material]
 
             let node = SCNNode(geometry: geometry)
-            // Position de l'ancre dans le monde
             node.simdTransform = matrix_multiply(worldToTagTransform, meshAnchor.transform)
 
-            // Filtrer les morceaux trop éloignés du tag (pour supprimer le sol/les murs)
             let distanceToOrigin = simd_length(node.simdPosition)
             if distanceToOrigin < radiusMeters * 1.5 {
                 rootNode.addChildNode(node)
@@ -75,7 +69,6 @@ final class MeshProcessingService {
         let scene = SCNScene()
         scene.rootNode.addChildNode(rootNode)
 
-        // Ajouter une lumière ambiante et directionnelle pour la visualisation
         let ambientLight = SCNNode()
         ambientLight.light = SCNLight()
         ambientLight.light?.type = .ambient
@@ -89,11 +82,11 @@ final class MeshProcessingService {
         dirLight.position = SCNVector3(x: 1, y: 3, z: 2)
         scene.rootNode.addChildNode(dirLight)
 
-        // Repère 3D visualisable (Axes X=rouge, Y=vert, Z=bleu au centre de l'AprilTag)
-        let axesNode = createAxesNode(size: 0.04) // 4 cm
+        // Axes de coordonnées au centre de l'AprilTag (X=Rouge, Y=Vert, Z=Bleu)
+        let axesNode = createAxesNode(size: 0.04)
         scene.rootNode.addChildNode(axesNode)
 
-        // 4. Exporter le fichier 3D dans le dossier temporaire
+        // 4. Exporter le fichier 3D
         let tempDir = FileManager.default.temporaryDirectory
         let fileURL = tempDir.appendingPathComponent("gabarit_3d.usdz")
 
@@ -129,16 +122,5 @@ final class MeshProcessingService {
             t*ax*ay+s*az, t*ay*ay+c,    t*ay*az-s*ax,
             t*ax*az-s*ay, t*ay*az+s*ax, t*az*az+c
         ]
-    }
-}
-
-extension SCNGeometry {
-    static func line(from: SCNVector3, to: SCNVector3, color: UIColor) -> SCNGeometry {
-        let indices: [Int32] = [0, 1]
-        let source = SCNGeometrySource(vertices: [from, to])
-        let element = SCNGeometryElement(indices: indices, primitiveType: .line)
-        let geom = SCNGeometry(sources: [source], elements: [element])
-        geom.firstMaterial?.diffuse.contents = color
-        return geom
     }
 }
