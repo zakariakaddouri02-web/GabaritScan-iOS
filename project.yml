@@ -1,0 +1,40 @@
+name: GabaritScan
+options:
+  bundleIdPrefix: com.gabaritscan
+settings:
+  base:
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    SWIFT_VERSION: "5.9"
+
+targets:
+  GabaritScan:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: GabaritScan/Sources
+      - path: GabaritScan/Native
+        excludes:
+          - "**/*.md"
+          - "**/.git*"
+      - path: GabaritScan/Resources
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.gabaritscan.app
+        INFOPLIST_FILE: GabaritScan/Resources/Info.plist
+        SWIFT_OBJC_BRIDGING_HEADER: GabaritScan/Native/GabaritScan-Bridging-Header.h
+        HEADER_SEARCH_PATHS:
+          - $(SRCROOT)/GabaritScan/Native
+          - $(SRCROOT)/GabaritScan/Native/apriltag
+          - $(SRCROOT)/GabaritScan/Native/apriltag/common
+        OTHER_CFLAGS:
+          - "-DTAG36H11"
+        ENABLE_BITCODE: NO
+        CODE_SIGN_IDENTITY: ""
+        CODE_SIGNING_REQUIRED: NO
+        CODE_SIGNING_ALLOWED: NO
+    dependencies:
+      - sdk: ARKit.framework
+      - sdk: AVFoundation.framework
+      - sdk: UIKit.framework
+      - sdk: CoreVideo.framework
