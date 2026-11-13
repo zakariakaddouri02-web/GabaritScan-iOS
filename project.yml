@@ -44,6 +44,7 @@ targets:
         CODE_SIGNING_ALLOWED: NO
     dependencies:
       - sdk: ARKit.framework
+      - sdk: SceneKit.framework
       - sdk: AVFoundation.framework
       - sdk: UIKit.framework
       - sdk: CoreVideo.framework

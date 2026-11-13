@@ -1,129 +1,66 @@
 import UIKit
-import AVFoundation
 import ARKit
 import simd
 
-/// UIViewController principal — équivalent de ScanFragment.kt
-/// Gère :
-///   - AVCaptureSession (preview + analyse frame YUV)
-///   - ARKit (pose téléphone)
-///   - AprilTagDetector
-///   - Délègue à ScanViewModel
+/// UIViewController utilisant ARKit natif pour la capture et le tracking
 final class ScanViewController: UIViewController {
 
-    // ── Injected ──────────────────────────────────────────────────────────────
     var viewModel: ScanViewModel!
 
-    // ── Camera ────────────────────────────────────────────────────────────────
-    private let captureSession   = AVCaptureSession()
-    private var previewLayer: AVCaptureVideoPreviewLayer!
-    private let videoOutput      = AVCaptureVideoDataOutput()
-    private let analysisQueue    = DispatchQueue(label: "com.gabaritscan.analysis",
-                                                 qos: .userInteractive)
+    // ARSCNView gère le rendu de la caméra à 60 fps avec l'orientation exacte
+    private var sceneView: ARSCNView!
 
-    // ── ARKit ─────────────────────────────────────────────────────────────────
-    private let arSession    = ARSession()
-    private var lastTransform: simd_float4x4? = nil
-    private var lastTimestamp: TimeInterval    = 0
-
-    // ── AprilTag ──────────────────────────────────────────────────────────────
+    // AprilTag detector
     private lazy var aprilTagDetector = AprilTagDetector(tagSizeMm: GabaritConfig.tagSizeMm)
+    private let analysisQueue = DispatchQueue(label: "com.gabaritscan.analysis", qos: .userInteractive)
+    private var isProcessingFrame = false
 
-    // ── UI ────────────────────────────────────────────────────────────────────
+    // AR tracking velocity estimation
+    private var lastTransform: simd_float4x4? = nil
+    private var lastTimestamp: TimeInterval = 0
+
+    // UI Overlays
     private var overlayView: ScanOverlayView!
     private var guideLabel:  UILabel!
     private var captureBtn:  UIButton!
     private var progressBar: UIProgressView!
     private var progressLbl: UILabel!
 
-    // MARK: - Lifecycle
-
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
-        setupCamera()
-        setupARKit()
+        setupSceneView()
         setupUI()
     }
 
-    override func viewDidAppear(_ animated: Bool) {
-        super.viewDidAppear(animated)
-        captureSession.startRunning()
-        arSession.run(makeARConfig(), options: [.resetTracking, .removeExistingAnchors])
+    override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        let config = ARWorldTrackingConfiguration()
+        config.worldAlignment = .gravity
+        sceneView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
     }
 
     override func viewWillDisappear(_ animated: Bool) {
         super.viewWillDisappear(animated)
-        captureSession.stopRunning()
-        arSession.pause()
+        sceneView.session.pause()
     }
 
-    // MARK: - Camera Setup
+    // MARK: - SceneView (ARKit Camera)
 
-    private func setupCamera() {
-        captureSession.sessionPreset = .photo   // 4032×3024 (12 MP mode principal)
-
-        guard let device = AVCaptureDevice.default(.builtInWideAngleCamera,
-                                                   for: .video, position: .back),
-              let input  = try? AVCaptureDeviceInput(device: device),
-              captureSession.canAddInput(input)
-        else { return }
-
-        captureSession.addInput(input)
-
-        // ── Lire les intrinsèques réelles depuis le capteur ──────────────────
-        // AVCameraCalibrationData disponible dans AVCaptureDepthDataOutput,
-        // mais pour Phase 1 on utilise les valeurs par défaut.
-        // Phase 2 : activer AVCaptureDepthDataOutput pour récupérer la matrice K exacte.
-
-        // ── Video output pour analyse frame ──────────────────────────────────
-        videoOutput.videoSettings = [
-            kCVPixelBufferPixelFormatTypeKey as String:
-                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-        ]
-        videoOutput.alwaysDiscardsLateVideoFrames = true
-        videoOutput.setSampleBufferDelegate(self, queue: analysisQueue)
-
-        if captureSession.canAddOutput(videoOutput) {
-            captureSession.addOutput(videoOutput)
-        }
-
-        // Orientation fixe portrait
-        videoOutput.connections.first?.videoOrientation = .portrait
-
-        // ── Preview layer ─────────────────────────────────────────────────────
-        previewLayer = AVCaptureVideoPreviewLayer(session: captureSession)
-        previewLayer.videoGravity = .resizeAspectFill
-        previewLayer.frame = view.bounds
-        view.layer.insertSublayer(previewLayer, at: 0)
-    }
-
-    // MARK: - ARKit Setup
-
-    private func makeARConfig() -> ARWorldTrackingConfiguration {
-        let config = ARWorldTrackingConfiguration()
-        config.worldAlignment = .gravity
-        // Depth (phase optionnelle — disponible sur iPhone 12 Pro Max avec LiDAR)
-        // On ne l'active pas en Phase 1.
-        // if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
-        //     config.sceneReconstruction = .mesh
-        // }
-        return config
-    }
-
-    private func setupARKit() {
-        arSession.delegate = self
+    private func setupSceneView() {
+        sceneView = ARSCNView(frame: view.bounds)
+        sceneView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        sceneView.session.delegate = self
+        view.addSubview(sceneView)
     }
 
     // MARK: - UI Setup
 
     private func setupUI() {
-        // Overlay
         overlayView = ScanOverlayView(frame: view.bounds)
         overlayView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(overlayView)
 
-        // Label guide (haut)
         guideLabel = UILabel()
         guideLabel.text = "Pointez le tag AprilTag"
         guideLabel.textColor = .white
@@ -131,61 +68,65 @@ final class ScanViewController: UIViewController {
         guideLabel.numberOfLines = 3
         guideLabel.textAlignment = .center
         guideLabel.backgroundColor = UIColor.black.withAlphaComponent(0.65)
-        guideLabel.layer.cornerRadius = 8
+        guideLabel.layer.cornerRadius = 10
         guideLabel.clipsToBounds = true
         guideLabel.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(guideLabel)
 
-        // Barre progression
         progressBar = UIProgressView(progressViewStyle: .default)
-        progressBar.tintColor = UIColor(red: 0.3, green: 0.8, blue: 0.3, alpha: 1)
+        progressBar.tintColor = UIColor(red: 0.2, green: 0.8, blue: 0.3, alpha: 1)
+        progressBar.trackTintColor = UIColor.white.withAlphaComponent(0.3)
         progressBar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(progressBar)
 
         progressLbl = UILabel()
         progressLbl.textColor = .white
-        progressLbl.font = .systemFont(ofSize: 13, weight: .medium)
+        progressLbl.font = .systemFont(ofSize: 14, weight: .semibold)
         progressLbl.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(progressLbl)
 
-        // Bouton capture
         captureBtn = UIButton(type: .custom)
         captureBtn.backgroundColor = .white
         captureBtn.layer.cornerRadius = 36
-        captureBtn.layer.borderWidth  = 4
-        captureBtn.layer.borderColor  = UIColor.lightGray.cgColor
+        captureBtn.layer.borderWidth = 4
+        captureBtn.layer.borderColor = UIColor.lightGray.cgColor
         captureBtn.addTarget(self, action: #selector(onCaptureTapped), for: .touchUpInside)
         captureBtn.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(captureBtn)
 
         NSLayoutConstraint.activate([
-            guideLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            guideLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            guideLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            guideLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            guideLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
+            guideLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
+            guideLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 50),
 
             captureBtn.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            captureBtn.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
+            captureBtn.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
             captureBtn.widthAnchor.constraint(equalToConstant: 72),
             captureBtn.heightAnchor.constraint(equalToConstant: 72),
 
             progressBar.bottomAnchor.constraint(equalTo: captureBtn.topAnchor, constant: -16),
             progressBar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            progressBar.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.6),
+            progressBar.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.65),
+            progressBar.heightAnchor.constraint(equalToConstant: 6),
 
-            progressLbl.bottomAnchor.constraint(equalTo: progressBar.topAnchor, constant: -4),
-            progressLbl.centerXAnchor.constraint(equalTo: view.centerXAnchor),
+            progressLbl.bottomAnchor.constraint(equalTo: progressBar.topAnchor, constant: -6),
+            progressLbl.centerXAnchor.constraint(equalTo: view.centerXAnchor)
         ])
     }
 
-    // MARK: - Actions
-
     @objc private func onCaptureTapped() {
-        Task { @MainActor in
-            viewModel.onManualCapture()
+        // Animation du bouton
+        UIView.animate(withDuration: 0.1, animations: {
+            self.captureBtn.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
+        }) { _ in
+            UIView.animate(withDuration: 0.1) {
+                self.captureBtn.transform = .identity
+            }
         }
+        viewModel.onManualCapture()
+        applyState(viewModel.state)
     }
-
-    // MARK: - Update UI from ViewModel state
 
     @MainActor
     private func applyState(_ state: ScanState) {
@@ -200,49 +141,30 @@ final class ScanViewController: UIViewController {
     }
 }
 
-// MARK: - AVCaptureVideoDataOutputSampleBufferDelegate
+// MARK: - ARSessionDelegate
 
-extension ScanViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
+extension ScanViewController: ARSessionDelegate {
 
-    func captureOutput(_ output: AVCaptureOutput,
-                       didOutput sampleBuffer: CMSampleBuffer,
-                       from connection: AVCaptureConnection) {
+    func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        guard !isProcessingFrame else { return }
+        isProcessingFrame = true
 
-        guard let pixelBuffer = CMSampleBufferGetImageBuffer(sampleBuffer) else { return }
+        let pixelBuffer = frame.capturedImage
+        let intrinsicsMatrix = frame.camera.intrinsics
 
-        let frameSize = CGSize(
-            width:  CVPixelBufferGetWidth(pixelBuffer),
-            height: CVPixelBufferGetHeight(pixelBuffer)
+        // Mettre à jour les intrinsèques exactes du capteur
+        let intrinsics = CameraIntrinsics(
+            fx: intrinsicsMatrix[0][0],
+            fy: intrinsicsMatrix[1][1],
+            cx: intrinsicsMatrix[2][0],
+            cy: intrinsicsMatrix[2][1]
         )
+        self.viewModel.intrinsics = intrinsics
 
-        // ── Détection AprilTag (thread analyse) ──────────────────────────────
-        let detections = aprilTagDetector.detect(
-            pixelBuffer: pixelBuffer,
-            intrinsics:  viewModel.intrinsics
-        )
-
-        // ── Pose ARKit (lire depuis le dernier frame ARKit reçu) ─────────────
-        let arkitPose = currentARKitPose()
-
-        // ── Mise à jour ViewModel sur le MainActor ───────────────────────────
-        Task { @MainActor [weak self] in
-            guard let self else { return }
-            self.viewModel.onFrameProcessed(
-                arkitPose:     arkitPose,
-                tagDetections: detections,
-                frameSize:     frameSize
-            )
-            self.applyState(self.viewModel.state)
-        }
-    }
-
-    private func currentARKitPose() -> ARKitPose? {
-        guard let frame = arSession.currentFrame else { return nil }
-        let isTracking = frame.camera.trackingState == .normal
-        let transform  = frame.camera.transform
-
-        // Estimer la vitesse à partir de la dérivée de position
+        let transform = frame.camera.transform
+        let isTracking = frame.camera.trackingState == .normal || !self.viewModel.state.tagDetections.isEmpty
         let now = frame.timestamp
+
         var velocity: Float = 0
         if let prev = lastTransform, lastTimestamp > 0 {
             let dt = Float(now - lastTimestamp)
@@ -253,28 +175,28 @@ extension ScanViewController: AVCaptureVideoDataOutputSampleBufferDelegate {
                 velocity = sqrt(dx*dx + dy*dy + dz*dz) / dt
             }
         }
-        lastTransform  = transform
-        lastTimestamp  = now
+        lastTransform = transform
+        lastTimestamp = now
 
-        return ARKitPose(transform: transform, isTracking: isTracking,
-                         velocityMagnitude: velocity)
-    }
-}
+        let arkitPose = ARKitPose(transform: transform, isTracking: isTracking, velocityMagnitude: velocity)
 
-// MARK: - ARSessionDelegate
+        let imageWidth = CVPixelBufferGetWidth(pixelBuffer)
+        let imageHeight = CVPixelBufferGetHeight(pixelBuffer)
+        let frameSize = CGSize(width: imageWidth, height: imageHeight)
 
-extension ScanViewController: ARSessionDelegate {
-    func session(_ session: ARSession, didFailWithError error: Error) {
-        Task { @MainActor in
-            guideLabel.text = "⚠️ ARKit erreur: \(error.localizedDescription)"
+        analysisQueue.async { [weak self] in
+            guard let self = self else { return }
+            let detections = self.aprilTagDetector.detect(pixelBuffer: pixelBuffer, intrinsics: intrinsics)
+
+            Task { @MainActor in
+                self.viewModel.onFrameProcessed(
+                    arkitPose: arkitPose,
+                    tagDetections: detections,
+                    frameSize: frameSize
+                )
+                self.applyState(self.viewModel.state)
+                self.isProcessingFrame = false
+            }
         }
-    }
-    func sessionWasInterrupted(_ session: ARSession) {
-        Task { @MainActor in
-            guideLabel.text = "⚠️ ARKit interrompu"
-        }
-    }
-    func sessionInterruptionEnded(_ session: ARSession) {
-        arSession.run(makeARConfig(), options: [.resetTracking])
     }
 }
