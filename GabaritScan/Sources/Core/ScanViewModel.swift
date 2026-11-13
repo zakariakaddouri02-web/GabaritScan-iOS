@@ -1,19 +1,33 @@
 import Foundation
 import simd
 import Combine
+import UIKit
 
-/// ViewModel principal
+/// ViewModel principal avec Auto-Capture intelligente et déclenchement automatique
 @MainActor
 final class ScanViewModel: ObservableObject {
 
     @Published private(set) var state = ScanState()
+    @Published var isAutoCaptureEnabled: Bool = true
 
     var intrinsics: CameraIntrinsics = .defaultIPhone12ProMax
 
     private let orbitGuide = OrbitGuide()
     private var capturedIndices = Set<Int>()
 
-    // MARK: - Appelé à chaque frame ARKit
+    // Gestion de l'Auto-Capture
+    private var lastAutoCaptureTime: TimeInterval = 0
+    private let autoCaptureCooldown: TimeInterval = 1.0 // 1 seconde minimum entre chaque photo
+    private let hapticFeedback = UIImpactFeedbackGenerator(style: .medium)
+
+    var onPhotoCaptured: (() -> Void)?
+    var onScanCompleted: (() -> Void)?
+
+    init() {
+        hapticFeedback.prepare()
+    }
+
+    // MARK: - Appelé à chaque frame
 
     func onFrameProcessed(
         arkitPose: ARKitPose?,
@@ -30,10 +44,14 @@ final class ScanViewModel: ObservableObject {
             )
         }
 
-        // Marquer la vue guide la plus proche comme couverte si la qualité est bonne
-        if let pos = cameraPos, quality.isGoodEnoughForCapture {
-            if let idx = orbitGuide.closestViewIndex(to: pos) {
-                capturedIndices.insert(idx)
+        // ── AUTO-CAPTURE INTELLIGENTE ──
+        if isAutoCaptureEnabled, let pos = cameraPos, quality.isGoodEnoughForCapture {
+            let now = ProcessInfo.processInfo.systemUptime
+            if now - lastAutoCaptureTime > autoCaptureCooldown {
+                if let closestIdx = orbitGuide.closestViewIndex(to: pos), !capturedIndices.contains(closestIdx) {
+                    triggerCapture(index: closestIdx)
+                    lastAutoCaptureTime = now
+                }
             }
         }
 
@@ -55,29 +73,33 @@ final class ScanViewModel: ObservableObject {
 
     func onManualCapture() {
         if let idx = state.nextGuideTarget?.viewIndex {
-            capturedIndices.insert(idx)
-            // Forcer la mise à jour immédiate
-            let nextTarget = orbitGuide.nextTarget(from: state.cameraInTagFrame, captured: capturedIndices)
-            state.capturedCount = capturedIndices.count
-            state.nextGuideTarget = nextTarget
-            state.guideMessage = buildGuideMessage(state.frameQuality, detections: state.tagDetections,
-                                                   next: nextTarget, current: state.cameraInTagFrame)
+            triggerCapture(index: idx)
         }
     }
 
-    // MARK: - Qualité (le tag visible suffit pour assurer le tracking)
+    private func triggerCapture(index: Int) {
+        capturedIndices.insert(index)
+        hapticFeedback.impactOccurred()
+        onPhotoCaptured?()
+
+        if capturedIndices.count >= GabaritConfig.numGuideViews {
+            onScanCompleted?()
+        }
+    }
+
+    // MARK: - Qualité
 
     private func computeQuality(pose: ARKitPose?,
                                 detections: [TagDetection]) -> FrameQuality {
         let tagVisible = !detections.isEmpty
-        // Si le tag est visible, le tracking n'est PAS perdu même si ARKit initialise encore
         let trackingOk = tagVisible || (pose?.isTracking ?? false)
 
         return FrameQuality(
             trackingLost:  !trackingOk,
             tagVisible:    tagVisible,
             tagPoseGood:   detections.first.map { $0.reprojectionError < 3.0 } ?? false,
-            isStable:      pose.map { $0.velocityMagnitude < 0.15 } ?? true,
+            // Stable si vitesse < 0.12 m/s
+            isStable:      pose.map { $0.velocityMagnitude < 0.12 } ?? true,
             isBlurry:      false,
             hasReflection: false
         )
@@ -92,13 +114,13 @@ final class ScanViewModel: ObservableObject {
         current: CameraPositionInTagFrame?
     ) -> String {
         if !q.tagVisible && q.trackingLost {
-            return "🔍 Pointez la caméra vers le tag AprilTag"
+            return "🔍 Pointez vers l'AprilTag pour caler le repère"
         }
         if !q.isStable {
-            return "🛑 Restez stable — bougez plus lentement"
+            return "🛑 Ne bougez plus — capture en cours..."
         }
         guard let next else {
-            return "🎉 Scan terminé ! 24/24 vues capturées."
+            return "🎉 Scan terminé ! Tapez 'Générer 3D' pour visualiser."
         }
 
         var dAz = next.azimuthDeg - (current?.azimuthDeg ?? 0)
@@ -112,7 +134,7 @@ final class ScanViewModel: ObservableObject {
 
         let header = "📷 Vue \(next.viewIndex + 1)/\(GabaritConfig.numGuideViews)"
         if directions.isEmpty {
-            return "\(header)\n✅ Parfait ! Appuyez sur le bouton blanc"
+            return "\(header)\n📸 Stabilisez pour capturer automatiquement !"
         } else {
             return "\(header)\n\(directions)"
         }

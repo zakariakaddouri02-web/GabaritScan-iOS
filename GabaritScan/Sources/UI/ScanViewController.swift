@@ -3,34 +3,7 @@ import ARKit
 import SceneKit
 import simd
 
-/// Extension pour convertir le maillage ARKit LiDAR en géométrie 3D SceneKit
-extension SCNGeometry {
-    convenience init(arMeshGeometry: ARMeshGeometry) {
-        let vertices = arMeshGeometry.vertices
-        let faces = arMeshGeometry.faces
-
-        let vertexSource = SCNGeometrySource(
-            buffer: vertices.buffer,
-            vertexFormat: vertices.format,
-            semantic: .vertex,
-            vertexCount: vertices.count,
-            dataOffset: vertices.offset,
-            dataStride: vertices.stride
-        )
-
-        let faceData = Data(bytesNoCopy: faces.buffer.contents(), count: faces.buffer.length, deallocator: .none)
-        let faceElement = SCNGeometryElement(
-            data: faceData,
-            primitiveType: .triangles,
-            primitiveCount: faces.count,
-            bytesPerIndex: faces.bytesPerIndex
-        )
-
-        self.init(sources: [vertexSource], elements: [faceElement])
-    }
-}
-
-/// UIViewController avec LiDAR temps réel et maillage 3D actif
+/// UIViewController avec Auto-Capture intelligente et Visualiseur 3D intégré
 final class ScanViewController: UIViewController {
 
     var viewModel: ScanViewModel!
@@ -42,20 +15,24 @@ final class ScanViewController: UIViewController {
 
     private var lastTransform: simd_float4x4? = nil
     private var lastTimestamp: TimeInterval = 0
+    private var lastTagDetection: TagDetection? = nil
 
     // UI Overlays
     private var overlayView: ScanOverlayView!
     private var guideLabel:  UILabel!
     private var lidarBadge:  UILabel!
     private var captureBtn:  UIButton!
+    private var generate3DBtn: UIButton!
     private var progressBar: UIProgressView!
     private var progressLbl: UILabel!
+    private var flashView:   UIView!
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.backgroundColor = .black
         setupSceneView()
         setupUI()
+        setupCallbacks()
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -68,7 +45,33 @@ final class ScanViewController: UIViewController {
         sceneView.session.pause()
     }
 
-    // MARK: - Configuration LiDAR & ARKit
+    // MARK: - Callbacks ViewModel
+
+    private func setupCallbacks() {
+        // Animation flash & vibration à chaque capture automatique
+        viewModel.onPhotoCaptured = { [weak self] in
+            guard let self = self else { return }
+            self.triggerFlashAnimation()
+        }
+
+        // Quand le scan est complet (24 vues)
+        viewModel.onScanCompleted = { [weak self] in
+            guard let self = self else { return }
+            self.onGenerate3D()
+        }
+    }
+
+    private func triggerFlashAnimation() {
+        UIView.animate(withDuration: 0.1, animations: {
+            self.flashView.alpha = 0.35
+        }) { _ in
+            UIView.animate(withDuration: 0.2) {
+                self.flashView.alpha = 0.0
+            }
+        }
+    }
+
+    // MARK: - ARKit Setup
 
     private func startARSessionWithLiDAR() {
         guard ARWorldTrackingConfiguration.isSupported else {
@@ -79,17 +82,15 @@ final class ScanViewController: UIViewController {
         let config = ARWorldTrackingConfiguration()
         config.worldAlignment = .gravity
 
-        // 1. Activer la reconstruction de maillage LiDAR si supportée
         if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
             config.sceneReconstruction = .mesh
             lidarBadge.text = "🟢 LiDAR 3D ACTIF"
             lidarBadge.textColor = UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0)
         } else {
-            lidarBadge.text = "⚠️ Mode Caméra Optique (Sans LiDAR)"
+            lidarBadge.text = "⚠️ Caméra Optique"
             lidarBadge.textColor = .yellow
         }
 
-        // 2. Activer la carte de profondeur LiDAR
         if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
             config.frameSemantics.insert(.sceneDepth)
         }
@@ -97,7 +98,6 @@ final class ScanViewController: UIViewController {
             config.frameSemantics.insert(.smoothedSceneDepth)
         }
 
-        // Lancer la session
         sceneView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
     }
 
@@ -107,21 +107,24 @@ final class ScanViewController: UIViewController {
         sceneView.delegate = self
         sceneView.session.delegate = self
         sceneView.autoenablesDefaultLighting = true
-
-        // Options de débogage pour voir le maillage et les points en direct
-        sceneView.debugOptions = [.showFeaturePoints]
-
         view.addSubview(sceneView)
     }
 
     // MARK: - UI Setup
 
     private func setupUI() {
+        // Flash visuel pour l'auto-capture
+        flashView = UIView(frame: view.bounds)
+        flashView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        flashView.backgroundColor = UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0)
+        flashView.alpha = 0.0
+        flashView.isUserInteractionEnabled = false
+        view.addSubview(flashView)
+
         overlayView = ScanOverlayView(frame: view.bounds)
         overlayView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(overlayView)
 
-        // Badge d'état du LiDAR en haut à gauche
         lidarBadge = UILabel()
         lidarBadge.text = "⏳ Détection LiDAR..."
         lidarBadge.font = .systemFont(ofSize: 12, weight: .bold)
@@ -146,25 +149,38 @@ final class ScanViewController: UIViewController {
         view.addSubview(guideLabel)
 
         progressBar = UIProgressView(progressViewStyle: .default)
-        progressBar.tintColor = UIColor(red: 0.2, green: 0.8, blue: 0.3, alpha: 1)
+        progressBar.tintColor = UIColor(red: 0.2, green: 0.85, blue: 0.4, alpha: 1)
         progressBar.trackTintColor = UIColor.white.withAlphaComponent(0.3)
         progressBar.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(progressBar)
 
         progressLbl = UILabel()
+        progressLbl.text = "0 / 24 vues (Auto-Capture Active 📸)"
         progressLbl.textColor = .white
         progressLbl.font = .systemFont(ofSize: 14, weight: .semibold)
         progressLbl.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(progressLbl)
 
+        // Bouton de capture manuelle
         captureBtn = UIButton(type: .custom)
         captureBtn.backgroundColor = .white
-        captureBtn.layer.cornerRadius = 36
+        captureBtn.layer.cornerRadius = 35
         captureBtn.layer.borderWidth = 4
         captureBtn.layer.borderColor = UIColor.lightGray.cgColor
         captureBtn.addTarget(self, action: #selector(onCaptureTapped), for: .touchUpInside)
         captureBtn.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(captureBtn)
+
+        // Bouton Générer 3D
+        generate3DBtn = UIButton(type: .system)
+        generate3DBtn.setTitle("Générer 3D 🎲", for: .normal)
+        generate3DBtn.setTitleColor(.black, for: .normal)
+        generate3DBtn.titleLabel?.font = .boldSystemFont(ofSize: 15)
+        generate3DBtn.backgroundColor = UIColor(red: 0.2, green: 0.9, blue: 0.45, alpha: 1.0)
+        generate3DBtn.layer.cornerRadius = 18
+        generate3DBtn.addTarget(self, action: #selector(onGenerate3D), for: .touchUpInside)
+        generate3DBtn.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(generate3DBtn)
 
         NSLayoutConstraint.activate([
             lidarBadge.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
@@ -178,13 +194,18 @@ final class ScanViewController: UIViewController {
             guideLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 50),
 
             captureBtn.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            captureBtn.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -24),
-            captureBtn.widthAnchor.constraint(equalToConstant: 72),
-            captureBtn.heightAnchor.constraint(equalToConstant: 72),
+            captureBtn.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
+            captureBtn.widthAnchor.constraint(equalToConstant: 70),
+            captureBtn.heightAnchor.constraint(equalToConstant: 70),
+
+            generate3DBtn.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            generate3DBtn.centerYAnchor.constraint(equalTo: captureBtn.centerYAnchor),
+            generate3DBtn.widthAnchor.constraint(equalToConstant: 120),
+            generate3DBtn.heightAnchor.constraint(equalToConstant: 44),
 
             progressBar.bottomAnchor.constraint(equalTo: captureBtn.topAnchor, constant: -16),
             progressBar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            progressBar.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.65),
+            progressBar.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.7),
             progressBar.heightAnchor.constraint(equalToConstant: 6),
 
             progressLbl.bottomAnchor.constraint(equalTo: progressBar.topAnchor, constant: -6),
@@ -193,15 +214,48 @@ final class ScanViewController: UIViewController {
     }
 
     @objc private func onCaptureTapped() {
-        UIView.animate(withDuration: 0.1, animations: {
-            self.captureBtn.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
-        }) { _ in
-            UIView.animate(withDuration: 0.1) {
-                self.captureBtn.transform = .identity
-            }
-        }
         viewModel.onManualCapture()
         applyState(viewModel.state)
+    }
+
+    // MARK: - Génération et Visualisation 3D
+
+    @objc private func onGenerate3D() {
+        guard let currentFrame = sceneView.session.currentFrame else {
+            print("⚠️ Aucune frame disponible pour générer la 3D")
+            return
+        }
+
+        // Afficher un indicateur d'activité
+        let alert = UIAlertController(title: "Traitement 3D...", message: "Alignement sur l'AprilTag et création du modèle...", preferredStyle: .alert)
+        present(alert, animated: true)
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            guard let self = self else { return }
+
+            let result = MeshProcessingService.processAndExportMesh(
+                from: currentFrame,
+                tagDetection: self.lastTagDetection
+            )
+
+            DispatchQueue.main.async {
+                alert.dismiss(animated: true) {
+                    guard let (fileURL, scene) = result else {
+                        let errAlert = UIAlertController(title: "Attention", message: "Aucun maillage 3D n'a encore été détecté. Bougez légèrement autour de l'objet pour scanner.", preferredStyle: .alert)
+                        errAlert.addAction(UIAlertAction(title: "OK", style: .default))
+                        self.present(errAlert, animated: true)
+                        return
+                    }
+
+                    // Ouvrir le visualiseur 3D interactif dans l'application !
+                    let viewerVC = ModelViewerViewController()
+                    viewerVC.modelScene = scene
+                    viewerVC.modelFileURL = fileURL
+                    viewerVC.modalPresentationStyle = .fullScreen
+                    self.present(viewerVC, animated: true)
+                }
+            }
+        }
     }
 
     @MainActor
@@ -213,11 +267,11 @@ final class ScanViewController: UIViewController {
             ? Float(state.capturedCount) / Float(state.totalGuideViews)
             : 0
         progressBar.setProgress(progress, animated: true)
-        progressLbl.text = "\(state.capturedCount) / \(state.totalGuideViews) vues"
+        progressLbl.text = "\(state.capturedCount) / \(state.totalGuideViews) vues (Auto 📸)"
     }
 }
 
-// MARK: - ARSCNViewDelegate (Rendu du maillage LiDAR 3D en direct)
+// MARK: - ARSCNViewDelegate (Maillage LiDAR temps réel)
 
 extension ScanViewController: ARSCNViewDelegate {
 
@@ -226,8 +280,8 @@ extension ScanViewController: ARSCNViewDelegate {
 
         let geometry = SCNGeometry(arMeshGeometry: meshAnchor.geometry)
         let material = SCNMaterial()
-        material.diffuse.contents = UIColor(red: 0.1, green: 0.6, blue: 1.0, alpha: 0.35)
-        material.fillMode = .lines // Wireframe / Grillage 3D
+        material.diffuse.contents = UIColor(red: 0.1, green: 0.65, blue: 1.0, alpha: 0.35)
+        material.fillMode = .lines // Grillage Wireframe 3D
         geometry.materials = [material]
 
         let node = SCNNode(geometry: geometry)
@@ -238,7 +292,7 @@ extension ScanViewController: ARSCNViewDelegate {
         guard let meshAnchor = anchor as? ARMeshAnchor else { return }
         let geometry = SCNGeometry(arMeshGeometry: meshAnchor.geometry)
         let material = SCNMaterial()
-        material.diffuse.contents = UIColor(red: 0.1, green: 0.6, blue: 1.0, alpha: 0.35)
+        material.diffuse.contents = UIColor(red: 0.1, green: 0.65, blue: 1.0, alpha: 0.35)
         material.fillMode = .lines
         geometry.materials = [material]
         node.geometry = geometry
@@ -292,6 +346,9 @@ extension ScanViewController: ARSessionDelegate {
             let detections = self.aprilTagDetector.detect(pixelBuffer: pixelBuffer, intrinsics: intrinsics)
 
             Task { @MainActor in
+                if let firstTag = detections.first {
+                    self.lastTagDetection = firstTag
+                }
                 self.viewModel.onFrameProcessed(
                     arkitPose: arkitPose,
                     tagDetections: detections,
