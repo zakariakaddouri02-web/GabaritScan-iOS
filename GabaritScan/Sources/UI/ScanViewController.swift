@@ -4,7 +4,7 @@ import SceneKit
 import simd
 import AudioToolbox
 
-/// UIViewController avec Auto-Capture basée sur le déplacement et vibration forte
+/// UIViewController avec Auto-Capture basée sur le déplacement, vibration forte et repère AprilTag verrouillé
 final class ScanViewController: UIViewController {
 
     var viewModel: ScanViewModel!
@@ -18,10 +18,13 @@ final class ScanViewController: UIViewController {
     private var lastTimestamp: TimeInterval = 0
     private var lastTagDetection: TagDetection? = nil
 
+    // Nœud 3D ancré de manière permanente dans la scène ARKit
+    private var tagAnchorNode: SCNNode? = nil
+
     // UI Overlays
     private var overlayView: ScanOverlayView!
     private var guideLabel:  UILabel!
-    private var statusBadge: UILabel!
+    private var statusBadge: UIButton!
     private var captureBtn:  UIButton!
     private var generate3DBtn: UIButton!
     private var progressBar: UIProgressView!
@@ -52,14 +55,9 @@ final class ScanViewController: UIViewController {
         let config = ARWorldTrackingConfiguration()
         config.worldAlignment = .gravity
 
-        // LiDAR activé si disponible (ne bloque pas si absent)
+        // Activer la reconstruction si supportée (sans bloquer si le LiDAR est inactif)
         if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
             config.sceneReconstruction = .mesh
-            statusBadge.text = "🟢 LiDAR Actif"
-            statusBadge.textColor = UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0)
-        } else {
-            statusBadge.text = "📷 Mode Optique Auto"
-            statusBadge.textColor = .cyan
         }
 
         sceneView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
@@ -89,19 +87,20 @@ final class ScanViewController: UIViewController {
         overlayView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(overlayView)
 
-        statusBadge = UILabel()
-        statusBadge.text = "📷 Prêt"
-        statusBadge.font = .systemFont(ofSize: 13, weight: .bold)
-        statusBadge.textColor = .white
+        statusBadge = UIButton(type: .system)
+        statusBadge.setTitle("📷 Visez l'AprilTag", for: .normal)
+        statusBadge.setTitleColor(.white, for: .normal)
+        statusBadge.titleLabel?.font = .systemFont(ofSize: 13, weight: .bold)
         statusBadge.backgroundColor = UIColor.black.withAlphaComponent(0.7)
-        statusBadge.layer.cornerRadius = 6
+        statusBadge.layer.cornerRadius = 8
         statusBadge.clipsToBounds = true
-        statusBadge.textAlignment = .center
+        statusBadge.contentEdgeInsets = UIEdgeInsets(top: 4, left: 12, bottom: 4, right: 12)
+        statusBadge.addTarget(self, action: #selector(onStatusBadgeTapped), for: .touchUpInside)
         statusBadge.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(statusBadge)
 
         guideLabel = UILabel()
-        guideLabel.text = "Pointez vers l'AprilTag pour commencer"
+        guideLabel.text = "Pointez vers l'AprilTag pour verrouiller le repère"
         guideLabel.textColor = .white
         guideLabel.font = .boldSystemFont(ofSize: 16)
         guideLabel.numberOfLines = 2
@@ -149,8 +148,7 @@ final class ScanViewController: UIViewController {
         NSLayoutConstraint.activate([
             statusBadge.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
             statusBadge.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            statusBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 140),
-            statusBadge.heightAnchor.constraint(equalToConstant: 26),
+            statusBadge.heightAnchor.constraint(equalToConstant: 28),
 
             guideLabel.topAnchor.constraint(equalTo: statusBadge.bottomAnchor, constant: 8),
             guideLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
@@ -178,15 +176,67 @@ final class ScanViewController: UIViewController {
     }
 
     private func setupCallbacks() {
-        // Flash et vibration à chaque photo automatique !
+        // Flash visuel à chaque capture automatique
         viewModel.onPhotoCaptured = { [weak self] in
             guard let self = self else { return }
             self.triggerFlashAnimation()
         }
 
+        // Ancrage 3D physique immédiat de l'AprilTag dans le monde
+        viewModel.onTagLockedFirstTime = { [weak self] worldTransform in
+            guard let self = self else { return }
+            self.anchorTagIn3DScene(transform: worldTransform)
+        }
+
         viewModel.onScanCompleted = { [weak self] in
             guard let self = self else { return }
             self.onGenerate3D()
+        }
+    }
+
+    // MARK: - Ancrage 3D Permanent de l'AprilTag dans la scène ARKit
+
+    private func anchorTagIn3DScene(transform: simd_float4x4) {
+        guard tagAnchorNode == nil else { return }
+
+        let container = SCNNode()
+        container.simdTransform = transform
+
+        // 1. Plan 80mm x 80mm centré sur l'AprilTag
+        let plane = SCNPlane(width: CGFloat(GabaritConfig.tagSizeMm / 1000.0),
+                             height: CGFloat(GabaritConfig.tagSizeMm / 1000.0))
+        plane.cornerRadius = 0.003
+        let planeMat = SCNMaterial()
+        planeMat.diffuse.contents = UIColor.yellow.withAlphaComponent(0.45)
+        planeMat.isDoubleSided = true
+        plane.materials = [planeMat]
+        let planeNode = SCNNode(geometry: plane)
+        container.addChildNode(planeNode)
+
+        // 2. Axes 3D (X: Rouge 5cm, Y: Vert 5cm, Z: Bleu 5cm)
+        let axisLen: Float = 0.05
+        let xAxis = SCNGeometry.line(from: SCNVector3Zero, to: SCNVector3(axisLen, 0, 0), color: .systemRed)
+        let yAxis = SCNGeometry.line(from: SCNVector3Zero, to: SCNVector3(0, axisLen, 0), color: .systemGreen)
+        let zAxis = SCNGeometry.line(from: SCNVector3Zero, to: SCNVector3(0, 0, axisLen), color: .systemCyan)
+        container.addChildNode(SCNNode(geometry: xAxis))
+        container.addChildNode(SCNNode(geometry: yAxis))
+        container.addChildNode(SCNNode(geometry: zAxis))
+
+        sceneView.scene.rootNode.addChildNode(container)
+        tagAnchorNode = container
+        print("📌 AprilTag ancré et verrouillé de manière fixe dans la scène 3D !")
+    }
+
+    @objc private func onStatusBadgeTapped() {
+        if viewModel.isTagLocked {
+            let alert = UIAlertController(title: "Repère Fixé 🔒", message: "Voulez-vous réinitialiser et re-pointer l'AprilTag ?", preferredStyle: .alert)
+            alert.addAction(UIAlertAction(title: "Recalibrer", style: .destructive) { [weak self] _ in
+                self?.tagAnchorNode?.removeFromParentNode()
+                self?.tagAnchorNode = nil
+                self?.viewModel.unlockTag()
+            })
+            alert.addAction(UIAlertAction(title: "Conserver", style: .cancel))
+            present(alert, animated: true)
         }
     }
 
@@ -211,18 +261,28 @@ final class ScanViewController: UIViewController {
         let alert = UIAlertController(title: "Création 3D...", message: "Alignement sur l'AprilTag...", preferredStyle: .alert)
         present(alert, animated: true)
 
+        let lockedTransform = viewModel.lockedTagWorldTransform
+        let points = viewModel.accumulatedPoints
+        let tagDet = self.lastTagDetection
+
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             guard let self = self else { return }
 
             let result = MeshProcessingService.processAndExportMesh(
                 from: currentFrame,
-                tagDetection: self.lastTagDetection
+                lockedTagTransform: lockedTransform,
+                tagDetection: tagDet,
+                featurePoints: points
             )
 
             DispatchQueue.main.async {
                 alert.dismiss(animated: true) {
                     guard let (fileURL, scene) = result else {
-                        let errAlert = UIAlertController(title: "Scan en cours", message: "Continuez à tourner autour de l'objet pour enregistrer plus de points.", preferredStyle: .alert)
+                        let errAlert = UIAlertController(
+                            title: "Scan en cours",
+                            message: "Pointez l'AprilTag et tournez autour du gabarit pour accumuler des points 3D.",
+                            preferredStyle: .alert
+                        )
                         errAlert.addAction(UIAlertAction(title: "OK", style: .default))
                         self.present(errAlert, animated: true)
                         return
@@ -242,6 +302,14 @@ final class ScanViewController: UIViewController {
     private func applyState(_ state: ScanState) {
         guideLabel.text = state.guideMessage
         overlayView.update(state: state)
+
+        if viewModel.isTagLocked {
+            statusBadge.setTitle("🔒 Repère Fixé (80mm)", for: .normal)
+            statusBadge.setTitleColor(UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0), for: .normal)
+        } else {
+            statusBadge.setTitle("📷 Visez l'AprilTag", for: .normal)
+            statusBadge.setTitleColor(.cyan, for: .normal)
+        }
 
         let total = viewModel.targetPhotoCount
         let current = viewModel.capturedCount
@@ -283,6 +351,11 @@ extension ScanViewController: ARSCNViewDelegate {
 extension ScanViewController: ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
+        // Collecte continue des points 3D optiques (fonctionne sans aucun LiDAR !)
+        if let featurePoints = frame.rawFeaturePoints?.points {
+            viewModel.addFeaturePoints(featurePoints)
+        }
+
         guard !isProcessingFrame else { return }
         isProcessingFrame = true
 
@@ -326,7 +399,6 @@ extension ScanViewController: ARSessionDelegate {
                     self.lastTagDetection = firstTag
                 }
 
-                // Auto-capture déclenchée automatiquement par déplacement (7cm ou 10°)
                 self.viewModel.onFrameProcessed(
                     cameraTransform: transform,
                     cameraVelocity: velocity,
