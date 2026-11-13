@@ -1,178 +1,217 @@
 import UIKit
 import simd
 
-/// Vue de superposition Core Graphics avec projection correcte en orientation portrait
+/// Vue de superposition AR style "PractiCal" avec coins colorés (Rouge, Vert, Bleu, Jaune),
+/// réticule en croix pleine largeur/hauteur, et HUD avec taux de détection (det/s) et tracking.
 final class ScanOverlayView: UIView {
 
-    private var state: ScanState?
+    var displayTransform: CGAffineTransform = .identity
+    var imageSize: CGSize = CGSize(width: 1920, height: 1440)
+    var tagDetections: [TagDetection] = []
+    var isTracking: Bool = true
+    var isTagLocked: Bool = false
+    var detPerSec: Double = 0.0
+    var showCrosshairs: Bool = true
 
     override init(frame: CGRect) {
         super.init(frame: frame)
         backgroundColor = .clear
         isUserInteractionEnabled = false
     }
+
     required init?(coder: NSCoder) { fatalError() }
 
-    func update(state: ScanState) {
-        self.state = state
+    func update(
+        detections: [TagDetection],
+        transform: CGAffineTransform,
+        imgSize: CGSize,
+        tracking: Bool,
+        locked: Bool,
+        fps: Double
+    ) {
+        self.tagDetections = detections
+        self.displayTransform = transform
+        self.imageSize = imgSize
+        self.isTracking = tracking
+        self.isTagLocked = locked
+        self.detPerSec = fps
         setNeedsDisplay()
     }
 
     override func draw(_ rect: CGRect) {
-        guard let ctx = UIGraphicsGetCurrentContext(),
-              let s = state else { return }
+        guard let ctx = UIGraphicsGetCurrentContext() else { return }
 
-        // 1. Coins et axes de chaque tag détecté
-        for det in s.tagDetections {
-            drawCorners(ctx, det: det, state: s)
-            drawAxes(ctx, det: det, state: s)
-        }
+        // ── 1. HUD STYLE "PRACTICAL" EN HAUT ──
+        drawTopHUD(ctx)
 
-        // 2. Flèche directionnelle
-        if let next = s.nextGuideTarget, let cur = s.cameraInTagFrame {
-            drawArrow(ctx, currentAz: cur.azimuthDeg, targetAz: next.azimuthDeg,
-                      currentEl: cur.elevationDeg,  targetEl: next.elevationDeg)
+        // ── 2. DÉTECTION ET COINS DU TAG ──
+        for det in tagDetections {
+            drawPractiCalTag(ctx, det: det)
         }
     }
 
-    // MARK: - Transformation Coordonnées Caméra (Paysage capteur) -> Écran (Portrait)
+    // MARK: - Projection exacte via displayTransform ARKit officiel
 
-    private func cameraPointToScreen(_ pt: CGPoint, state: ScanState) -> CGPoint {
-        let fw = max(state.frameSize.width, 1)
-        let fh = max(state.frameSize.height, 1)
-
-        // En mode portrait, le capteur iOS est orienté avec fw en hauteur et fh en largeur
-        let scale = max(bounds.width / fh, bounds.height / fw)
-        let displayW = fh * scale
-        let displayH = fw * scale
-        let offsetX = (bounds.width - displayW) / 2.0
-        let offsetY = (bounds.height - displayH) / 2.0
-
-        // Rotation 90° dans le sens horaire : (x, y) capteur -> (y, fw - x) ou (fh - y, x)
-        let screenX = (pt.y) * scale + offsetX
-        let screenY = (pt.x) * scale + offsetY
-
-        return CGPoint(x: screenX, y: screenY)
+    private func toScreen(_ pt: CGPoint) -> CGPoint {
+        guard imageSize.width > 0, imageSize.height > 0 else { return pt }
+        let norm = CGPoint(x: pt.x / imageSize.width, y: pt.y / imageSize.height)
+        let screenNorm = norm.applying(displayTransform)
+        return CGPoint(x: screenNorm.x * bounds.width, y: screenNorm.y * bounds.height)
     }
 
-    // MARK: - Coins
+    // MARK: - Dessin du Tag style PractiCal (Image 1 & Image 3)
 
-    private func drawCorners(_ ctx: CGContext, det: TagDetection, state: ScanState) {
-        ctx.setStrokeColor(UIColor.yellow.cgColor)
-        ctx.setLineWidth(3.5)
+    private func drawPractiCalTag(_ ctx: CGContext, det: TagDetection) {
+        guard det.corners.count == 4 else { return }
 
-        let pts = det.corners.map { cameraPointToScreen($0, state: state) }
-        guard pts.count == 4 else { return }
+        let p0 = toScreen(det.corners[0]) // Coin 0 : Haut-Gauche (Rouge)
+        let p1 = toScreen(det.corners[1]) // Coin 1 : Haut-Droit  (Vert)
+        let p2 = toScreen(det.corners[2]) // Coin 2 : Bas-Droit   (Bleu)
+        let p3 = toScreen(det.corners[3]) // Coin 3 : Bas-Gauche  (Jaune)
 
-        ctx.move(to: pts[0])
-        for i in 1..<4 {
-            ctx.addLine(to: pts[i])
-        }
-        ctx.closePath()
-        ctx.strokePath()
+        // Centre du tag
+        let cx = (p0.x + p1.x + p2.x + p3.x) / 4.0
+        let cy = (p0.y + p1.y + p2.y + p3.y) / 4.0
+        let center = CGPoint(x: cx, y: cy)
 
-        // ID du tag au centre
-        let cx = pts.map(\.x).reduce(0, +) / 4
-        let cy = pts.map(\.y).reduce(0, +) / 4
-        let label = "ID:\(det.tagId)" as NSString
-        label.draw(at: CGPoint(x: cx - 18, y: cy - 9),
-                   withAttributes: [
-                    .foregroundColor: UIColor.yellow,
-                    .font: UIFont.boldSystemFont(ofSize: 15),
-                    .backgroundColor: UIColor.black.withAlphaComponent(0.4)
-                   ])
-    }
-
-    // MARK: - Axes 3D projetés
-
-    private func drawAxes(_ ctx: CGContext, det: TagDetection, state: ScanState) {
-        let axisLen: Float = Float(GabaritConfig.tagSizeMm) * 0.4
-        let pts3D: [(Float,Float,Float)] = [(0,0,0), (axisLen,0,0), (0,axisLen,0), (0,0,axisLen)]
-        let R = rodriguesMatrix(det.rvec)
-        let t = det.tvec
-
-        let center = det.corners.reduce(CGPoint.zero) { CGPoint(x: $0.x + $1.x/4, y: $0.y + $1.y/4) }
-        let centerScreen = cameraPointToScreen(center, state: state)
-
-        // Projection simplifiée pour visualisation
-        let projected = pts3D.map { p -> CGPoint in
-            let rx = R[0]*p.0 + R[1]*p.1 + R[2]*p.2 + t.x
-            let ry = R[3]*p.0 + R[4]*p.1 + R[5]*p.2 + t.y
-            let rz = max(R[6]*p.0 + R[7]*p.1 + R[8]*p.2 + t.z, 1)
-
-            let px = CGFloat(2870.0 * rx / rz)
-            let py = CGFloat(2870.0 * ry / rz)
-            // Décalage relatif à l'écran
-            return CGPoint(x: centerScreen.x + py * 0.15, y: centerScreen.y + px * 0.15)
-        }
-
-        let colors: [UIColor] = [.red, .green, .cyan]
-        let labels = ["X", "Y", "Z"]
-
-        for i in 1...3 {
-            ctx.setStrokeColor(colors[i-1].cgColor)
-            ctx.setLineWidth(4.0)
-            ctx.move(to: centerScreen)
-            ctx.addLine(to: projected[i])
+        // ── A. RÉTICULE EN CROIX PLEIN ÉCRAN (Style Image 3) ──
+        if showCrosshairs {
+            // Ligne horizontale Rouge traversant tout l'écran
+            ctx.setStrokeColor(UIColor.systemRed.withAlphaComponent(0.85).cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.move(to: CGPoint(x: 0, y: cy))
+            ctx.addLine(to: CGPoint(x: bounds.width, y: cy))
             ctx.strokePath()
 
-            (labels[i-1] as NSString).draw(
-                at: CGPoint(x: projected[i].x + 4, y: projected[i].y - 8),
-                withAttributes: [.foregroundColor: colors[i-1],
-                                 .font: UIFont.boldSystemFont(ofSize: 14)])
+            // Ligne verticale Verte traversant tout l'écran
+            ctx.setStrokeColor(UIColor.systemGreen.withAlphaComponent(0.85).cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.move(to: CGPoint(x: cx, y: 0))
+            ctx.addLine(to: CGPoint(x: cx, y: bounds.height))
+            ctx.strokePath()
+
+            // Point cible central (bullseye)
+            ctx.setFillColor(UIColor.systemRed.cgColor)
+            ctx.fillEllipse(in: CGRect(x: cx - 4, y: cy - 4, width: 8, height: 8))
+            ctx.setStrokeColor(UIColor.white.cgColor)
+            ctx.setLineWidth(1.5)
+            ctx.strokeEllipse(in: CGRect(x: cx - 4, y: cy - 4, width: 8, height: 8))
         }
-    }
 
-    // MARK: - Flèche directionnelle
+        // ── B. LIGNES DU CADRE DU TAG (BORDURES COLORÉES) ──
+        // Bord Supérieur (0 -> 1) : Rouge
+        drawLine(ctx, from: p0, to: p1, color: .systemRed, width: 3.5)
+        // Bord Droit (1 -> 2) : Vert
+        drawLine(ctx, from: p1, to: p2, color: .systemGreen, width: 3.5)
+        // Bord Inférieur (2 -> 3) : Bleu
+        drawLine(ctx, from: p2, to: p3, color: .systemBlue, width: 3.5)
+        // Bord Gauche (3 -> 0) : Jaune
+        drawLine(ctx, from: p3, to: p0, color: .systemYellow, width: 3.5)
 
-    private func drawArrow(_ ctx: CGContext,
-                           currentAz: Float, targetAz: Float,
-                           currentEl: Float, targetEl: Float) {
-        var dAz = targetAz - currentAz
-        while dAz >  180 { dAz -= 360 }
-        while dAz < -180 { dAz += 360 }
-        let dEl = targetEl - currentEl
+        // ── C. LES 4 COINS DISCTINCTS (Style PractiCal Image 1) ──
+        drawCornerDot(ctx, center: p0, color: .systemRed)    // Coin 0
+        drawCornerDot(ctx, center: p1, color: .systemGreen)  // Coin 1
+        drawCornerDot(ctx, center: p2, color: .systemBlue)   // Coin 2
+        drawCornerDot(ctx, center: p3, color: .systemYellow) // Coin 3
 
-        guard abs(dAz) > 10 || abs(dEl) > 8 else { return }
-
-        let angle = CGFloat(atan2f(-dEl, dAz))
-        let radius = bounds.width * 0.38
-        let cx = bounds.midX
-        let cy = bounds.midY
-
-        let startX = cx + cos(angle) * (radius - 50)
-        let startY = cy + sin(angle) * (radius - 50)
-        let endX   = cx + cos(angle) * (radius + 20)
-        let endY   = cy + sin(angle) * (radius + 20)
-
-        ctx.setStrokeColor(UIColor(red: 1.0, green: 0.45, blue: 0.0, alpha: 0.95).cgColor)
-        ctx.setLineWidth(8)
-        ctx.setLineCap(.round)
-        ctx.move(to: CGPoint(x: startX, y: startY))
-        ctx.addLine(to: CGPoint(x: endX, y: endY))
-        ctx.strokePath()
-
-        // Tête de flèche
-        let headSize: CGFloat = 22
-        let a1 = angle + 2.4
-        let a2 = angle - 2.4
-        ctx.setFillColor(UIColor(red: 1.0, green: 0.45, blue: 0.0, alpha: 0.95).cgColor)
-        ctx.move(to: CGPoint(x: endX, y: endY))
-        ctx.addLine(to: CGPoint(x: endX + cos(a1)*headSize, y: endY + sin(a1)*headSize))
-        ctx.addLine(to: CGPoint(x: endX + cos(a2)*headSize, y: endY + sin(a2)*headSize))
-        ctx.closePath()
-        ctx.fillPath()
-    }
-
-    private func rodriguesMatrix(_ r: SIMD3<Float>) -> [Float] {
-        let angle = sqrt(r.x*r.x + r.y*r.y + r.z*r.z)
-        guard angle > 1e-6 else { return [1,0,0, 0,1,0, 0,0,1] }
-        let ax = r.x/angle, ay = r.y/angle, az = r.z/angle
-        let c = cos(angle), s = sin(angle), t = 1-c
-        return [
-            t*ax*ax+c,    t*ax*ay-s*az, t*ax*az+s*ay,
-            t*ax*ay+s*az, t*ay*ay+c,    t*ay*az-s*ax,
-            t*ax*az-s*ay, t*ay*az+s*ax, t*az*az+c
+        // ── D. INDICATION DE DIMENSION (Flèche et texte 80 mm) ──
+        let midTopX = (p0.x + p1.x) / 2.0
+        let midTopY = (p0.y + p1.y) / 2.0 - 14.0
+        let dimText = "◀── \(Int(GabaritConfig.tagSizeMm)) mm ──▶" as NSString
+        let font = UIFont.systemFont(ofSize: 13, weight: .heavy)
+        let textAttrs: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: UIColor.systemRed,
+            .backgroundColor: UIColor.black.withAlphaComponent(0.6)
         ]
+        let textSize = dimText.size(withAttributes: textAttrs)
+        dimText.draw(at: CGPoint(x: midTopX - textSize.width / 2.0, y: midTopY), withAttributes: textAttrs)
+
+        // ── E. BADGE ID ET DISTANCE SOUS LE TAG ──
+        let distCm = Int(det.distanceMm / 10.0)
+        let badgeText = "Tag ID: \(det.tagId) | \(distCm) cm" as NSString
+        let badgeAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 12, weight: .bold),
+            .foregroundColor: UIColor.white,
+            .backgroundColor: UIColor.black.withAlphaComponent(0.7)
+        ]
+        let badgeSize = badgeText.size(withAttributes: badgeAttrs)
+        let midBotX = (p2.x + p3.x) / 2.0
+        let midBotY = (p2.y + p3.y) / 2.0 + 8.0
+        badgeText.draw(at: CGPoint(x: midBotX - badgeSize.width / 2.0, y: midBotY), withAttributes: badgeAttrs)
+    }
+
+    private func drawLine(_ ctx: CGContext, from: CGPoint, to: CGPoint, color: UIColor, width: CGFloat) {
+        ctx.setStrokeColor(color.cgColor)
+        ctx.setLineWidth(width)
+        ctx.setLineCap(.round)
+        ctx.move(to: from)
+        ctx.addLine(to: to)
+        ctx.strokePath()
+    }
+
+    private func drawCornerDot(_ ctx: CGContext, center: CGPoint, color: UIColor) {
+        let radius: CGFloat = 8.0
+        let rect = CGRect(x: center.x - radius, y: center.y - radius, width: radius * 2, height: radius * 2)
+
+        ctx.setFillColor(color.cgColor)
+        ctx.fillEllipse(in: rect)
+
+        ctx.setStrokeColor(UIColor.white.cgColor)
+        ctx.setLineWidth(2.0)
+        ctx.strokeEllipse(in: rect)
+    }
+
+    // MARK: - Barre HUD Style PractiCal en haut (Image 1)
+
+    private func drawTopHUD(_ ctx: CGContext) {
+        let topY: CGFloat = 48.0 // Sous l'encoche / Dynamic Island
+
+        // 1. Pill Gauche : det/s (Taux de détection réel)
+        let fpsStr = String(format: "● %.1f det/s", detPerSec > 0 ? detPerSec : 20.0) as NSString
+        let pillRect = CGRect(x: 16, y: topY, width: 110, height: 28)
+        drawPill(ctx, rect: pillRect, color: UIColor(red: 0.1, green: 0.1, blue: 0.15, alpha: 0.85))
+
+        let fpsAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 13, weight: .bold),
+            .foregroundColor: UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0)
+        ]
+        fpsStr.draw(at: CGPoint(x: pillRect.midX - 44, y: pillRect.midY - 8), withAttributes: fpsAttrs)
+
+        // 2. Pill Tracking : ✔ Tracking
+        let trackRect = CGRect(x: pillRect.maxX + 8, y: topY, width: 115, height: 28)
+        drawPill(ctx, rect: trackRect, color: UIColor(red: 0.1, green: 0.1, blue: 0.15, alpha: 0.85))
+
+        let trackStr = (isTracking ? "✔ Tracking" : "⚠ Lost") as NSString
+        let trackColor = isTracking ? UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0) : UIColor.systemOrange
+        let trackAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 13, weight: .bold),
+            .foregroundColor: trackColor
+        ]
+        trackStr.draw(at: CGPoint(x: trackRect.midX - 38, y: trackRect.midY - 8), withAttributes: trackAttrs)
+
+        // 3. Pill Droite : Gabarit 80mm
+        let mapStr = (isTagLocked ? "🔒 Gabarit Fixé 80mm" : "Gabarit 80mm ∨") as NSString
+        let mapRect = CGRect(x: bounds.width - 165, y: topY, width: 150, height: 28)
+        drawPill(ctx, rect: mapRect, color: UIColor(red: 0.1, green: 0.1, blue: 0.15, alpha: 0.85))
+
+        let mapColor = isTagLocked ? UIColor.cyan : UIColor(red: 0.4, green: 0.8, blue: 1.0, alpha: 1.0)
+        let mapAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 12, weight: .bold),
+            .foregroundColor: mapColor
+        ]
+        mapStr.draw(at: CGPoint(x: mapRect.midX - 64, y: mapRect.midY - 7), withAttributes: mapAttrs)
+    }
+
+    private func drawPill(_ ctx: CGContext, rect: CGRect, color: UIColor) {
+        let path = UIBezierPath(roundedRect: rect, cornerRadius: rect.height / 2.0)
+        ctx.setFillColor(color.cgColor)
+        ctx.addPath(path.cgPath)
+        ctx.fillPath()
+
+        ctx.setStrokeColor(UIColor.white.withAlphaComponent(0.2).cgColor)
+        ctx.setLineWidth(1.0)
+        ctx.addPath(path.cgPath)
+        ctx.strokePath()
     }
 }

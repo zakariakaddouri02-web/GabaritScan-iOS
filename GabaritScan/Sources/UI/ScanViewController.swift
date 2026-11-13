@@ -4,7 +4,7 @@ import SceneKit
 import simd
 import AudioToolbox
 
-/// UIViewController avec Auto-Capture basée sur le déplacement, vibration forte et repère AprilTag verrouillé
+/// UIViewController principal avec interface et détection style "PractiCal"
 final class ScanViewController: UIViewController {
 
     var viewModel: ScanViewModel!
@@ -18,18 +18,23 @@ final class ScanViewController: UIViewController {
     private var lastTimestamp: TimeInterval = 0
     private var lastTagDetection: TagDetection? = nil
 
-    // Nœud 3D ancré de manière permanente dans la scène ARKit
+    // Nœud 3D ancré dans la scène ARKit (Grille CAD + Axes + Rectangles virtuels style Image 2)
     private var tagAnchorNode: SCNNode? = nil
 
-    // UI Overlays
+    // Calcul du taux de détection (det/s)
+    private var frameCounter: Int = 0
+    private var lastFpsTimestamp: TimeInterval = 0
+    private var currentDetPerSec: Double = 0.0
+
+    // UI Overlays & Contrôles PractiCal
     private var overlayView: ScanOverlayView!
-    private var guideLabel:  UILabel!
-    private var statusBadge: UIButton!
-    private var captureBtn:  UIButton!
-    private var generate3DBtn: UIButton!
-    private var progressBar: UIProgressView!
-    private var progressLbl: UILabel!
     private var flashView:   UIView!
+    private var bottomHUD:   UIView!
+    private var calibrateBtn: UIButton!
+    private var tabFieldBtn:  UIButton!
+    private var tabAlignBtn:  UIButton!
+    private var tabExportBtn: UIButton!
+    private var tabResetBtn:  UIButton!
 
     override func viewDidLoad() {
         super.viewDidLoad()
@@ -55,7 +60,6 @@ final class ScanViewController: UIViewController {
         let config = ARWorldTrackingConfiguration()
         config.worldAlignment = .gravity
 
-        // Activer la reconstruction si supportée (sans bloquer si le LiDAR est inactif)
         if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
             config.sceneReconstruction = .mesh
         }
@@ -72,10 +76,10 @@ final class ScanViewController: UIViewController {
         view.addSubview(sceneView)
     }
 
-    // MARK: - UI Setup
+    // MARK: - Interface Utilisateur Style PractiCal (Image 1)
 
     private func setupUI() {
-        // Flash visuel pour chaque capture automatique
+        // Flash vert pour la capture
         flashView = UIView(frame: view.bounds)
         flashView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         flashView.backgroundColor = UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0)
@@ -83,182 +87,156 @@ final class ScanViewController: UIViewController {
         flashView.isUserInteractionEnabled = false
         view.addSubview(flashView)
 
+        // Superposition 2D réticule et coins colorés
         overlayView = ScanOverlayView(frame: view.bounds)
         overlayView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(overlayView)
 
-        statusBadge = UIButton(type: .system)
-        statusBadge.setTitle("📷 Visez l'AprilTag", for: .normal)
-        statusBadge.setTitleColor(.white, for: .normal)
-        statusBadge.titleLabel?.font = .systemFont(ofSize: 13, weight: .bold)
-        statusBadge.backgroundColor = UIColor.black.withAlphaComponent(0.7)
-        statusBadge.layer.cornerRadius = 8
-        statusBadge.clipsToBounds = true
-        statusBadge.contentEdgeInsets = UIEdgeInsets(top: 4, left: 12, bottom: 4, right: 12)
-        statusBadge.addTarget(self, action: #selector(onStatusBadgeTapped), for: .touchUpInside)
-        statusBadge.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(statusBadge)
+        // Barre inférieure sombre style PractiCal
+        bottomHUD = UIView()
+        bottomHUD.backgroundColor = UIColor(red: 0.08, green: 0.08, blue: 0.12, alpha: 0.92)
+        bottomHUD.layer.cornerRadius = 24
+        bottomHUD.layer.maskedCorners = [.layerMinXMinYCorner, .layerMaxXMinYCorner]
+        bottomHUD.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(bottomHUD)
 
-        guideLabel = UILabel()
-        guideLabel.text = "Pointez vers l'AprilTag pour verrouiller le repère"
-        guideLabel.textColor = .white
-        guideLabel.font = .boldSystemFont(ofSize: 16)
-        guideLabel.numberOfLines = 2
-        guideLabel.textAlignment = .center
-        guideLabel.backgroundColor = UIColor.black.withAlphaComponent(0.65)
-        guideLabel.layer.cornerRadius = 10
-        guideLabel.clipsToBounds = true
-        guideLabel.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(guideLabel)
+        // Bouton Calibrate / Fixer (Vert vif, style Image 1)
+        calibrateBtn = UIButton(type: .system)
+        calibrateBtn.setTitle("▶ Calibrate / Fixer", for: .normal)
+        calibrateBtn.setTitleColor(.white, for: .normal)
+        calibrateBtn.titleLabel?.font = .systemFont(ofSize: 17, weight: .heavy)
+        calibrateBtn.backgroundColor = UIColor(red: 0.15, green: 0.78, blue: 0.35, alpha: 1.0)
+        calibrateBtn.layer.cornerRadius = 24
+        calibrateBtn.addTarget(self, action: #selector(onCalibrateTapped), for: .touchUpInside)
+        calibrateBtn.translatesAutoresizingMaskIntoConstraints = false
+        bottomHUD.addSubview(calibrateBtn)
 
-        progressBar = UIProgressView(progressViewStyle: .default)
-        progressBar.tintColor = UIColor(red: 0.2, green: 0.9, blue: 0.4, alpha: 1)
-        progressBar.trackTintColor = UIColor.white.withAlphaComponent(0.3)
-        progressBar.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(progressBar)
+        // Onglets inférieurs : Export | 3D Field | Align | Clear
+        tabExportBtn = createTabButton(title: "Export", action: #selector(onExportTapped))
+        tabFieldBtn  = createTabButton(title: "3D Field", action: #selector(onFieldTapped), isHighlighted: true)
+        tabAlignBtn  = createTabButton(title: "Align ┼", action: #selector(onAlignTapped))
+        tabResetBtn  = createTabButton(title: "Clear", action: #selector(onResetTapped))
 
-        progressLbl = UILabel()
-        progressLbl.text = "0 / 30 photos capturées"
-        progressLbl.textColor = .white
-        progressLbl.font = .systemFont(ofSize: 14, weight: .bold)
-        progressLbl.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(progressLbl)
-
-        // Bouton de capture manuelle de secours
-        captureBtn = UIButton(type: .custom)
-        captureBtn.backgroundColor = .white
-        captureBtn.layer.cornerRadius = 35
-        captureBtn.layer.borderWidth = 4
-        captureBtn.layer.borderColor = UIColor.lightGray.cgColor
-        captureBtn.addTarget(self, action: #selector(onCaptureTapped), for: .touchUpInside)
-        captureBtn.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(captureBtn)
-
-        // Bouton Générer 3D
-        generate3DBtn = UIButton(type: .system)
-        generate3DBtn.setTitle("Générer 3D 🎲", for: .normal)
-        generate3DBtn.setTitleColor(.black, for: .normal)
-        generate3DBtn.titleLabel?.font = .boldSystemFont(ofSize: 15)
-        generate3DBtn.backgroundColor = UIColor(red: 0.2, green: 0.9, blue: 0.45, alpha: 1.0)
-        generate3DBtn.layer.cornerRadius = 18
-        generate3DBtn.addTarget(self, action: #selector(onGenerate3D), for: .touchUpInside)
-        generate3DBtn.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(generate3DBtn)
+        let tabsStack = UIStackView(arrangedSubviews: [tabExportBtn, tabFieldBtn, tabAlignBtn, tabResetBtn])
+        tabsStack.axis = .horizontal
+        tabsStack.distribution = .fillEqually
+        tabsStack.spacing = 8
+        tabsStack.translatesAutoresizingMaskIntoConstraints = false
+        bottomHUD.addSubview(tabsStack)
 
         NSLayoutConstraint.activate([
-            statusBadge.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
-            statusBadge.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
-            statusBadge.heightAnchor.constraint(equalToConstant: 28),
+            bottomHUD.leadingAnchor.constraint(equalTo: view.leadingAnchor),
+            bottomHUD.trailingAnchor.constraint(equalTo: view.trailingAnchor),
+            bottomHUD.bottomAnchor.constraint(equalTo: view.bottomAnchor),
+            bottomHUD.heightAnchor.constraint(equalToConstant: 145),
 
-            guideLabel.topAnchor.constraint(equalTo: statusBadge.bottomAnchor, constant: 8),
-            guideLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
-            guideLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
-            guideLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 45),
+            calibrateBtn.topAnchor.constraint(equalTo: bottomHUD.topAnchor, constant: 14),
+            calibrateBtn.trailingAnchor.constraint(equalTo: bottomHUD.trailingAnchor, constant: -16),
+            calibrateBtn.leadingAnchor.constraint(equalTo: bottomHUD.leadingAnchor, constant: 16),
+            calibrateBtn.heightAnchor.constraint(equalToConstant: 48),
 
-            captureBtn.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            captureBtn.bottomAnchor.constraint(equalTo: view.safeAreaLayoutGuide.bottomAnchor, constant: -20),
-            captureBtn.widthAnchor.constraint(equalToConstant: 70),
-            captureBtn.heightAnchor.constraint(equalToConstant: 70),
-
-            generate3DBtn.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
-            generate3DBtn.centerYAnchor.constraint(equalTo: captureBtn.centerYAnchor),
-            generate3DBtn.widthAnchor.constraint(equalToConstant: 120),
-            generate3DBtn.heightAnchor.constraint(equalToConstant: 44),
-
-            progressBar.bottomAnchor.constraint(equalTo: captureBtn.topAnchor, constant: -16),
-            progressBar.centerXAnchor.constraint(equalTo: view.centerXAnchor),
-            progressBar.widthAnchor.constraint(equalTo: view.widthAnchor, multiplier: 0.7),
-            progressBar.heightAnchor.constraint(equalToConstant: 6),
-
-            progressLbl.bottomAnchor.constraint(equalTo: progressBar.topAnchor, constant: -6),
-            progressLbl.centerXAnchor.constraint(equalTo: view.centerXAnchor)
+            tabsStack.topAnchor.constraint(equalTo: calibrateBtn.bottomAnchor, constant: 12),
+            tabsStack.leadingAnchor.constraint(equalTo: bottomHUD.leadingAnchor, constant: 16),
+            tabsStack.trailingAnchor.constraint(equalTo: bottomHUD.trailingAnchor, constant: -16),
+            tabsStack.heightAnchor.constraint(equalToConstant: 36)
         ])
     }
 
+    private func createTabButton(title: String, action: Selector, isHighlighted: Bool = false) -> UIButton {
+        let btn = UIButton(type: .system)
+        btn.setTitle(title, for: .normal)
+        btn.setTitleColor(isHighlighted ? .white : UIColor(white: 0.7, alpha: 1.0), for: .normal)
+        btn.titleLabel?.font = .systemFont(ofSize: 14, weight: isHighlighted ? .bold : .medium)
+        btn.backgroundColor = isHighlighted ? UIColor(red: 0.1, green: 0.45, blue: 0.95, alpha: 0.9) : UIColor(white: 0.18, alpha: 0.8)
+        btn.layer.cornerRadius = 10
+        btn.addTarget(self, action: action, for: .touchUpInside)
+        return btn
+    }
+
     private func setupCallbacks() {
-        // Flash visuel à chaque capture automatique
         viewModel.onPhotoCaptured = { [weak self] in
             guard let self = self else { return }
             self.triggerFlashAnimation()
         }
 
-        // Ancrage 3D physique immédiat de l'AprilTag dans le monde
         viewModel.onTagLockedFirstTime = { [weak self] worldTransform in
             guard let self = self else { return }
-            self.anchorTagIn3DScene(transform: worldTransform)
-        }
-
-        viewModel.onScanCompleted = { [weak self] in
-            guard let self = self else { return }
-            self.onGenerate3D()
+            self.anchorCADSceneInWorld(transform: worldTransform)
         }
     }
 
-    // MARK: - Ancrage 3D Permanent de l'AprilTag dans la scène ARKit
+    // MARK: - Ancrage Réel 3D CAD dans le Monde ARKit (Style Image 2)
 
-    private func anchorTagIn3DScene(transform: simd_float4x4) {
+    private func anchorCADSceneInWorld(transform: simd_float4x4) {
         guard tagAnchorNode == nil else { return }
 
         let container = SCNNode()
         container.simdTransform = transform
 
-        // 1. Plan 80mm x 80mm centré sur l'AprilTag
-        let plane = SCNPlane(width: CGFloat(GabaritConfig.tagSizeMm / 1000.0),
-                             height: CGFloat(GabaritConfig.tagSizeMm / 1000.0))
-        plane.cornerRadius = 0.003
-        let planeMat = SCNMaterial()
-        planeMat.diffuse.contents = UIColor.yellow.withAlphaComponent(0.45)
-        planeMat.isDoubleSided = true
-        plane.materials = [planeMat]
-        let planeNode = SCNNode(geometry: plane)
-        container.addChildNode(planeNode)
+        // 1. Grille 3D CAD métrique sur la surface (Image 2)
+        let grid = CADSceneBuilder.createGrid(sizeMeters: 0.9, stepMeters: 0.05, isVertical: false)
+        container.addChildNode(grid)
 
-        // 2. Axes 3D (X: Rouge 5cm, Y: Vert 5cm, Z: Bleu 5cm)
-        let axisLen: Float = 0.05
-        let xAxis = SCNGeometry.line(from: SCNVector3Zero, to: SCNVector3(axisLen, 0, 0), color: .systemRed)
-        let yAxis = SCNGeometry.line(from: SCNVector3Zero, to: SCNVector3(0, axisLen, 0), color: .systemGreen)
-        let zAxis = SCNGeometry.line(from: SCNVector3Zero, to: SCNVector3(0, 0, axisLen), color: .systemCyan)
-        container.addChildNode(SCNNode(geometry: xAxis))
-        container.addChildNode(SCNNode(geometry: yAxis))
-        container.addChildNode(SCNNode(geometry: zAxis))
+        // 2. Grille verticale murale (Image 2)
+        let wallGrid = CADSceneBuilder.createGrid(sizeMeters: 0.9, stepMeters: 0.05, isVertical: true)
+        container.addChildNode(wallGrid)
+
+        // 3. Axes 3D (X: Orange, Y: Vert, Z: Cyan)
+        let axes = CADSceneBuilder.createAxes(length: 0.09)
+        container.addChildNode(axes)
+
+        // 4. Rectangles calibrés virtuels ("Rectangle 1" Cyan et Magenta style Image 2 & 3)
+        let rect1 = CADSceneBuilder.createCalibratedRectangle(
+            width: 0.20,
+            height: 0.14,
+            color: UIColor(red: 0.1, green: 0.85, blue: 0.95, alpha: 1.0),
+            label: "Rectangle 1",
+            position: SCNVector3(0, 0.11, 0)
+        )
+        container.addChildNode(rect1)
+
+        let rect2 = CADSceneBuilder.createCalibratedRectangle(
+            width: 0.10,
+            height: 0.10,
+            color: UIColor(red: 1.0, green: 0.2, blue: 0.7, alpha: 1.0),
+            label: "Ref Zone",
+            position: SCNVector3(-0.12, 0.14, 0)
+        )
+        container.addChildNode(rect2)
+
+        // 5. Cadre AprilTag 80mm
+        let tagPlane = SCNPlane(width: CGFloat(GabaritConfig.tagSizeMm / 1000.0),
+                                height: CGFloat(GabaritConfig.tagSizeMm / 1000.0))
+        tagPlane.cornerRadius = 0.003
+        let tagMat = SCNMaterial()
+        tagMat.diffuse.contents = UIColor.yellow.withAlphaComponent(0.35)
+        tagMat.isDoubleSided = true
+        tagPlane.materials = [tagMat]
+        container.addChildNode(SCNNode(geometry: tagPlane))
 
         sceneView.scene.rootNode.addChildNode(container)
         tagAnchorNode = container
-        print("📌 AprilTag ancré et verrouillé de manière fixe dans la scène 3D !")
+        print("🏛️ Scène 3D CAD ancrée dans le monde ARKit !")
     }
 
-    @objc private func onStatusBadgeTapped() {
-        if viewModel.isTagLocked {
-            let alert = UIAlertController(title: "Repère Fixé 🔒", message: "Voulez-vous réinitialiser et re-pointer l'AprilTag ?", preferredStyle: .alert)
-            alert.addAction(UIAlertAction(title: "Recalibrer", style: .destructive) { [weak self] _ in
-                self?.tagAnchorNode?.removeFromParentNode()
-                self?.tagAnchorNode = nil
-                self?.viewModel.unlockTag()
-            })
-            alert.addAction(UIAlertAction(title: "Conserver", style: .cancel))
-            present(alert, animated: true)
+    // MARK: - Actions des Boutons
+
+    @objc private func onCalibrateTapped() {
+        if let currentTag = lastTagDetection, !viewModel.isTagLocked {
+            viewModel.onManualCapture()
+            calibrateBtn.setTitle("✔ Calibré (3D Verrouillé)", for: .normal)
+            calibrateBtn.backgroundColor = UIColor(red: 0.1, green: 0.5, blue: 0.9, alpha: 1.0)
+        } else {
+            // Déclenche une prise manuelle ou ouvre 3D Field
+            viewModel.onManualCapture()
         }
     }
 
-    private func triggerFlashAnimation() {
-        UIView.animate(withDuration: 0.08, animations: {
-            self.flashView.alpha = 0.45
-        }) { _ in
-            UIView.animate(withDuration: 0.15) {
-                self.flashView.alpha = 0.0
-            }
-        }
-    }
-
-    @objc private func onCaptureTapped() {
-        viewModel.onManualCapture()
-        applyState(viewModel.state)
-    }
-
-    @objc private func onGenerate3D() {
+    @objc private func onFieldTapped() {
+        // Ouvre l'environnement 3D complet (Image 2)
         guard let currentFrame = sceneView.session.currentFrame else { return }
 
-        let alert = UIAlertController(title: "Création 3D...", message: "Alignement sur l'AprilTag...", preferredStyle: .alert)
+        let alert = UIAlertController(title: "3D Field", message: "Chargement de la scène 3D CAD...", preferredStyle: .alert)
         present(alert, animated: true)
 
         let lockedTransform = viewModel.lockedTagWorldTransform
@@ -277,17 +255,7 @@ final class ScanViewController: UIViewController {
 
             DispatchQueue.main.async {
                 alert.dismiss(animated: true) {
-                    guard let (fileURL, scene) = result else {
-                        let errAlert = UIAlertController(
-                            title: "Scan en cours",
-                            message: "Pointez l'AprilTag et tournez autour du gabarit pour accumuler des points 3D.",
-                            preferredStyle: .alert
-                        )
-                        errAlert.addAction(UIAlertAction(title: "OK", style: .default))
-                        self.present(errAlert, animated: true)
-                        return
-                    }
-
+                    guard let (fileURL, scene) = result else { return }
                     let viewerVC = ModelViewerViewController()
                     viewerVC.modelScene = scene
                     viewerVC.modelFileURL = fileURL
@@ -298,60 +266,55 @@ final class ScanViewController: UIViewController {
         }
     }
 
-    @MainActor
-    private func applyState(_ state: ScanState) {
-        guideLabel.text = state.guideMessage
-        overlayView.update(state: state)
+    @objc private func onAlignTapped() {
+        // Active/désactive le réticule en croix plein écran (Image 3)
+        overlayView.showCrosshairs.toggle()
+        tabAlignBtn.backgroundColor = overlayView.showCrosshairs ?
+            UIColor(red: 0.1, green: 0.45, blue: 0.95, alpha: 0.9) : UIColor(white: 0.18, alpha: 0.8)
+    }
 
-        if viewModel.isTagLocked {
-            statusBadge.setTitle("🔒 Repère Fixé (80mm)", for: .normal)
-            statusBadge.setTitleColor(UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0), for: .normal)
-        } else {
-            statusBadge.setTitle("📷 Visez l'AprilTag", for: .normal)
-            statusBadge.setTitleColor(.cyan, for: .normal)
+    @objc private func onResetTapped() {
+        tagAnchorNode?.removeFromParentNode()
+        tagAnchorNode = nil
+        viewModel.unlockTag()
+        calibrateBtn.setTitle("▶ Calibrate / Fixer", for: .normal)
+        calibrateBtn.backgroundColor = UIColor(red: 0.15, green: 0.78, blue: 0.35, alpha: 1.0)
+    }
+
+    @objc private func onExportTapped() {
+        onFieldTapped()
+    }
+
+    private func triggerFlashAnimation() {
+        UIView.animate(withDuration: 0.08, animations: {
+            self.flashView.alpha = 0.45
+        }) { _ in
+            UIView.animate(withDuration: 0.15) {
+                self.flashView.alpha = 0.0
+            }
         }
-
-        let total = viewModel.targetPhotoCount
-        let current = viewModel.capturedCount
-        let progress = total > 0 ? Float(current) / Float(total) : 0
-        progressBar.setProgress(progress, animated: true)
-        progressLbl.text = "\(current) / \(total) photos capturées 📸"
     }
 }
 
 // MARK: - ARSCNViewDelegate
 
-extension ScanViewController: ARSCNViewDelegate {
-
-    func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
-        guard let meshAnchor = anchor as? ARMeshAnchor else { return nil }
-
-        let geometry = SCNGeometry.from(arMeshGeometry: meshAnchor.geometry)
-        let material = SCNMaterial()
-        material.diffuse.contents = UIColor(red: 0.1, green: 0.65, blue: 1.0, alpha: 0.35)
-        material.fillMode = .lines
-        geometry.materials = [material]
-
-        return SCNNode(geometry: geometry)
-    }
-
-    func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
-        guard let meshAnchor = anchor as? ARMeshAnchor else { return }
-        let geometry = SCNGeometry.from(arMeshGeometry: meshAnchor.geometry)
-        let material = SCNMaterial()
-        material.diffuse.contents = UIColor(red: 0.1, green: 0.65, blue: 1.0, alpha: 0.35)
-        material.fillMode = .lines
-        geometry.materials = [material]
-        node.geometry = geometry
-    }
-}
+extension ScanViewController: ARSCNViewDelegate {}
 
 // MARK: - ARSessionDelegate
 
 extension ScanViewController: ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        // Collecte continue des points 3D optiques (fonctionne sans aucun LiDAR !)
+        // 1. Calcul du taux de détection réel (det/s)
+        frameCounter += 1
+        let nowTime = ProcessInfo.processInfo.systemUptime
+        if nowTime - lastFpsTimestamp >= 0.5 {
+            currentDetPerSec = Double(frameCounter) / (nowTime - lastFpsTimestamp)
+            frameCounter = 0
+            lastFpsTimestamp = nowTime
+        }
+
+        // 2. Collecte des points 3D optiques (fonctionne sans LiDAR)
         if let featurePoints = frame.rawFeaturePoints?.points {
             viewModel.addFeaturePoints(featurePoints)
         }
@@ -386,9 +349,12 @@ extension ScanViewController: ARSessionDelegate {
         lastTransform = transform
         lastTimestamp = now
 
-        let imageWidth = CVPixelBufferGetWidth(pixelBuffer)
-        let imageHeight = CVPixelBufferGetHeight(pixelBuffer)
-        let frameSize = CGSize(width: imageWidth, height: imageHeight)
+        let imgW = CGFloat(CVPixelBufferGetWidth(pixelBuffer))
+        let imgH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
+        let imageSize = CGSize(width: imgW, height: imgH)
+
+        // Matrice de projection officielle ARKit pour coller parfaitement aux pixels de l'écran
+        let displayTransform = frame.displayTransform(for: .portrait, viewportSize: sceneView.bounds.size)
 
         analysisQueue.async { [weak self] in
             guard let self = self else { return }
@@ -403,10 +369,19 @@ extension ScanViewController: ARSessionDelegate {
                     cameraTransform: transform,
                     cameraVelocity: velocity,
                     tagDetections: detections,
-                    frameSize: frameSize
+                    frameSize: imageSize
                 )
 
-                self.applyState(self.viewModel.state)
+                // Mise à jour de la superposition PractiCal
+                self.overlayView.update(
+                    detections: detections,
+                    transform: displayTransform,
+                    imgSize: imageSize,
+                    tracking: true,
+                    locked: self.viewModel.isTagLocked,
+                    fps: self.currentDetPerSec
+                )
+
                 self.isProcessingFrame = false
             }
         }
