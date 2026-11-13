@@ -420,7 +420,8 @@ final class ScanViewController: UIViewController {
                 PhotogrammetryService.shared.captureFrame(
                     pixelBuffer: pb,
                     cameraTransform: camT,
-                    intrinsics: self.viewModel.intrinsics
+                    intrinsics: self.viewModel.intrinsics,
+                    lockedTagTransform: self.viewModel.lockedTagWorldTransform
                 )
             }
         }
@@ -500,7 +501,32 @@ final class ScanViewController: UIViewController {
     }
 
     @objc private func onShareTapped() {
-        // Placeholder — will be linked after scan
+        exportDatasetForPC()
+    }
+
+    private func exportDatasetForPC() {
+        let alert = UIAlertController(
+            title: "Exporter pour PC 💻",
+            message: "Création de l'archive ZIP avec photos HD + repère AprilTag (0,0,0) + transforms.json pour traitement sur PC...",
+            preferredStyle: .actionSheet
+        )
+        alert.addAction(UIAlertAction(title: "📦 Exporter Dataset ZIP (AirDrop / Fichiers / USB)", style: .default) { [weak self] _ in
+            guard let self = self else { return }
+            if let zipURL = PhotogrammetryService.shared.exportDatasetZip() {
+                let activityVC = UIActivityViewController(activityItems: [zipURL], applicationActivities: nil)
+                if let popover = activityVC.popoverPresentationController {
+                    popover.sourceView = self.shareButton
+                    popover.sourceRect = self.shareButton.bounds
+                }
+                self.present(activityVC, animated: true)
+            }
+        })
+        alert.addAction(UIAlertAction(title: "Annuler", style: .cancel))
+        if let popover = alert.popoverPresentationController {
+            popover.sourceView = shareButton
+            popover.sourceRect = shareButton.bounds
+        }
+        present(alert, animated: true)
     }
 
     @objc private func onCaptureTapped() {
@@ -521,6 +547,26 @@ final class ScanViewController: UIViewController {
     }
 
     @objc private func onGenerate3D() {
+        let sheet = UIAlertController(
+            title: "Terminer le Scan 🎉",
+            message: "Choisissez où vous souhaitez traiter le scan :",
+            preferredStyle: .actionSheet
+        )
+        sheet.addAction(UIAlertAction(title: "📱 Voir en 3D direct sur l'iPhone", style: .default) { [weak self] _ in
+            self?.runLocal3DReconstruction()
+        })
+        sheet.addAction(UIAlertAction(title: "💻 Exporter Dataset ZIP pour PC", style: .default) { [weak self] _ in
+            self?.exportDatasetForPC()
+        })
+        sheet.addAction(UIAlertAction(title: "Reprendre le scan", style: .cancel))
+        if let popover = sheet.popoverPresentationController {
+            popover.sourceView = doneButton
+            popover.sourceRect = doneButton.bounds
+        }
+        present(sheet, animated: true)
+    }
+
+    private func runLocal3DReconstruction() {
         guard let currentFrame = sceneView.session.currentFrame else { return }
 
         let alert = UIAlertController(title: "Reconstruction 3D", message: "Génération du modèle…", preferredStyle: .alert)

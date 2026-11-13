@@ -5,7 +5,8 @@ import CoreImage
 import simd
 import RealityKit
 
-/// Service de photogrammétrie inspiré de Polycam (Object Mode & Apple Object Capture iOS 17+)
+/// Service de capture et d'export du dataset complet (Photos HD + Poses dans le repère AprilTag + transforms.json)
+/// Prêt pour traitement direct sur PC (Photogrammétrie, COLMAP, NeRF, Blender, Python)
 final class PhotogrammetryService {
 
     static let shared = PhotogrammetryService()
@@ -18,6 +19,7 @@ final class PhotogrammetryService {
     private var imageCount: Int = 0
 
     private var poses: [[String: Any]] = []
+    private var lastIntrinsics: CameraIntrinsics? = nil
 
     // MARK: - Initialisation d'une session de capture
 
@@ -25,8 +27,8 @@ final class PhotogrammetryService {
         let fileManager = FileManager.default
         let docs = fileManager.urls(for: .documentDirectory, in: .userDomainMask)[0]
         let timestamp = Int(Date().timeIntervalSince1970)
-        let session = docs.appendingPathComponent("Scan_\(timestamp)", isDirectory: true)
-        let imgs = session.appendingPathComponent("Images", isDirectory: true)
+        let session = docs.appendingPathComponent("GabaritScan_\(timestamp)", isDirectory: true)
+        let imgs = session.appendingPathComponent("images", isDirectory: true)
 
         try? fileManager.createDirectory(at: imgs, withIntermediateDirectories: true)
         self.currentSessionDir = session
@@ -34,73 +36,122 @@ final class PhotogrammetryService {
         self.imageCount = 0
         self.poses = []
 
-        print("📸 Nouvelle session de capture Polycam initialisée : \(session.path)")
+        print("📸 Nouvelle session de capture initialisée : \(session.path)")
     }
 
-    // MARK: - Sauvegarde d'une photo haute résolution + Pose Caméra
+    // MARK: - Sauvegarde d'une photo haute résolution + Pose relative au Tag
 
-    func captureFrame(pixelBuffer: CVPixelBuffer, cameraTransform: simd_float4x4, intrinsics: CameraIntrinsics) {
+    func captureFrame(
+        pixelBuffer: CVPixelBuffer,
+        cameraTransform: simd_float4x4,
+        intrinsics: CameraIntrinsics,
+        lockedTagTransform: simd_float4x4?
+    ) {
         guard let imgs = imagesDir else { return }
 
         imageCount += 1
+        lastIntrinsics = intrinsics
         let fileName = String(format: "IMG_%04d.jpg", imageCount)
         let fileURL = imgs.appendingPathComponent(fileName)
 
+        // Sauvegarde de l'image JPEG haute définition
         let ciImage = CIImage(cvPixelBuffer: pixelBuffer)
         guard let data = ciContext.jpegRepresentation(of: ciImage, colorSpace: colorSpace, options: [:]) else {
             return
         }
         try? data.write(to: fileURL)
 
-        // Enregistrement de la pose dans le repère universel
-        let c0 = [cameraTransform.columns.0.x, cameraTransform.columns.0.y, cameraTransform.columns.0.z, cameraTransform.columns.0.w]
-        let c1 = [cameraTransform.columns.1.x, cameraTransform.columns.1.y, cameraTransform.columns.1.z, cameraTransform.columns.1.w]
-        let c2 = [cameraTransform.columns.2.x, cameraTransform.columns.2.y, cameraTransform.columns.2.z, cameraTransform.columns.2.w]
-        let c3 = [cameraTransform.columns.3.x, cameraTransform.columns.3.y, cameraTransform.columns.3.z, cameraTransform.columns.3.w]
+        // Matrice de la caméra dans le repère de l'AprilTag (0,0,0 = Centre du Tag)
+        let camPoseInTag: simd_float4x4
+        if let tagWorld = lockedTagTransform {
+            let worldToTag = tagWorld.inverse
+            camPoseInTag = matrix_multiply(worldToTag, cameraTransform)
+        } else {
+            camPoseInTag = cameraTransform
+        }
+
+        // Matrice 4x4 au format standard NeRF / Polycam (colonnes)
+        let c0 = [camPoseInTag.columns.0.x, camPoseInTag.columns.0.y, camPoseInTag.columns.0.z, camPoseInTag.columns.0.w]
+        let c1 = [camPoseInTag.columns.1.x, camPoseInTag.columns.1.y, camPoseInTag.columns.1.z, camPoseInTag.columns.1.w]
+        let c2 = [camPoseInTag.columns.2.x, camPoseInTag.columns.2.y, camPoseInTag.columns.2.z, camPoseInTag.columns.2.w]
+        let c3 = [camPoseInTag.columns.3.x, camPoseInTag.columns.3.y, camPoseInTag.columns.3.z, camPoseInTag.columns.3.w]
 
         let poseEntry: [String: Any] = [
-            "file_path": fileName,
+            "file_path": "images/\(fileName)",
             "transform_matrix": [c0, c1, c2, c3],
-            "fl_x": intrinsics.fx,
-            "fl_y": intrinsics.fy,
-            "cx": intrinsics.cx,
-            "cy": intrinsics.cy
+            "timestamp": ProcessInfo.processInfo.systemUptime
         ]
         poses.append(poseEntry)
     }
 
-    // MARK: - Sauvegarde des métadonnées transforms.json (standard Polycam/NeRF)
+    // MARK: - Sauvegarde des métadonnées transforms.json (standard NeRF / Polycam / COLMAP)
 
     func finalizeCaptures() {
         guard let session = currentSessionDir else { return }
         let jsonURL = session.appendingPathComponent("transforms.json")
 
+        let fx = lastIntrinsics?.fx ?? 2870.0
+        let fy = lastIntrinsics?.fy ?? 2870.0
+        let cx = lastIntrinsics?.cx ?? 960.0
+        let cy = lastIntrinsics?.cy ?? 720.0
+
         let meta: [String: Any] = [
-            "capture_count": imageCount,
-            "camera_model": "iPhone",
+            "camera_model": "PINHOLE",
+            "fl_x": fx,
+            "fl_y": fy,
+            "cx": cx,
+            "cy": cy,
+            "w": 1920,
+            "h": 1440,
+            "tag_info": [
+                "family": "tag36h11",
+                "size_mm": GabaritConfig.tagSizeMm,
+                "origin": [0.0, 0.0, 0.0],
+                "unit": "meters"
+            ],
             "frames": poses
         ]
+
         if let data = try? JSONSerialization.data(withJSONObject: meta, options: .prettyPrinted) {
             try? data.write(to: jsonURL)
+            print("📝 transforms.json généré avec succès (\(imageCount) photos) !")
         }
     }
 
-    // MARK: - Reconstruction 3D (Apple PhotogrammetrySession iOS 17+ ou Fallback)
+    // MARK: - Création de l'archive ZIP complète pour le PC
+
+    func exportDatasetZip() -> URL? {
+        finalizeCaptures()
+        guard let session = currentSessionDir else { return nil }
+
+        let coordinator = NSFileCoordinator()
+        var zipURL: URL?
+
+        coordinator.coordinate(readingItemAt: session, options: .forUploading, error: nil) { zippedURL in
+            let timestamp = Int(Date().timeIntervalSince1970)
+            let dest = FileManager.default.temporaryDirectory.appendingPathComponent("GabaritScan_Dataset_\(timestamp).zip")
+            try? FileManager.default.removeItem(at: dest)
+            try? FileManager.default.copyItem(at: zippedURL, to: dest)
+            zipURL = dest
+        }
+
+        print("📦 Archive ZIP créée pour le PC : \(zipURL?.path ?? "erreur")")
+        return zipURL
+    }
+
+    // MARK: - Reconstruction 3D locale sur l'iPhone (Apple Object Capture iOS 17+)
 
     func reconstruct3DModel(outputURL: URL, progress: @escaping (Float) -> Void) async -> URL? {
         finalizeCaptures()
         guard let imgs = imagesDir, imageCount >= 10 else {
-            print("⚠️ Pas assez d'images pour la photogrammétrie (minimum 10)")
             return nil
         }
 
         #if canImport(RealityKit)
         if #available(iOS 17.0, *) {
             if PhotogrammetrySession.isSupported {
-                print("🚀 Démarrage de la reconstruction PhotogrammetrySession (Apple Object Capture iOS 17)...")
                 do {
                     var config = PhotogrammetrySession.Configuration()
-                    // Masquage automatique du décor (style Object Masking de Polycam !)
                     config.isObjectMaskingEnabled = true
 
                     let session = try PhotogrammetrySession(input: imgs, configuration: config)
@@ -110,7 +161,6 @@ final class PhotogrammetryService {
                     for try await output in session.outputs {
                         switch output {
                         case .processingComplete:
-                            print("🎉 Reconstruction 3D Polycam réussie !")
                             return outputURL
                         case .requestProgress(_, let frac):
                             progress(Float(frac))
