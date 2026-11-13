@@ -9,13 +9,12 @@ workflows:
       cocoapods: default
 
     scripts:
-      # 1. Cloner AprilTag C et nettoyer les fichiers inutiles (tests, demos, python, cmake)
+      # 1. Cloner AprilTag C et nettoyer les fichiers inutiles
       - name: "Cloner et nettoyer AprilTag C"
         script: |
           rm -rf GabaritScan/Native/apriltag
           git clone --depth=1 https://github.com/AprilRobotics/apriltag.git GabaritScan/Native/apriltag
           
-          # Nettoyage des dossiers et fichiers incompatibles avec iOS / compilation C pure
           rm -rf GabaritScan/Native/apriltag/test
           rm -rf GabaritScan/Native/apriltag/example
           rm -rf GabaritScan/Native/apriltag/gui
@@ -38,7 +37,7 @@ workflows:
           echo "✅ GabaritScan.xcodeproj généré avec succès"
 
       # 3. Compiler l'archive
-      - name: "Build Archive non signée"
+      - name: "Build Archive"
         script: |
           xcodebuild \
             -project GabaritScan.xcodeproj \
@@ -51,18 +50,18 @@ workflows:
             CODE_SIGNING_ALLOWED=NO \
             archive
 
-      # 4. Exporter l'IPA pour AltServer
-      - name: "Exporter IPA"
+      # 4. Empaqueter l'IPA pour AltServer (sans besoin de compte Apple payant)
+      - name: "Empaqueter IPA pour AltServer"
         script: |
-          xcodebuild \
-            -exportArchive \
-            -archivePath build/GabaritScan.xcarchive \
-            -exportPath build/ipa \
-            -exportOptionsPlist ExportOptions.plist
+          mkdir -p build/ipa/Payload
+          cp -r build/GabaritScan.xcarchive/Products/Applications/GabaritScan.app build/ipa/Payload/
+          cd build/ipa
+          zip -qr GabaritScan.ipa Payload
+          rm -rf Payload
+          echo "✅ GabaritScan.ipa créé avec succès pour AltServer"
 
     artifacts:
       - build/ipa/*.ipa
-      - build/ipa/*.plist
       - /tmp/xcodebuild_logs/*.log
 
     publishing:
