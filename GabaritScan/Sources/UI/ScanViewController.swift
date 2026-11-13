@@ -4,7 +4,8 @@ import SceneKit
 import simd
 import AudioToolbox
 
-/// UIViewController principal avec interface et détection style "PractiCal"
+/// UIViewController combinant la détection PractiCal (coins colorés, réticule)
+/// et le mode objet Polycam (CropBox 3D, auto-capture et photogrammétrie)
 final class ScanViewController: UIViewController {
 
     var viewModel: ScanViewModel!
@@ -17,8 +18,9 @@ final class ScanViewController: UIViewController {
     private var lastTransform: simd_float4x4? = nil
     private var lastTimestamp: TimeInterval = 0
     private var lastTagDetection: TagDetection? = nil
+    private var latestPixelBuffer: CVPixelBuffer? = nil
 
-    // Nœud 3D ancré dans la scène ARKit (Grille CAD + Axes + Rectangles virtuels style Image 2)
+    // Nœud 3D ancré dans la scène ARKit (Grille CAD + CropBox Polycam + Axes)
     private var tagAnchorNode: SCNNode? = nil
 
     // Calcul du taux de détection (det/s)
@@ -26,7 +28,7 @@ final class ScanViewController: UIViewController {
     private var lastFpsTimestamp: TimeInterval = 0
     private var currentDetPerSec: Double = 0.0
 
-    // UI Overlays & Contrôles PractiCal
+    // UI Overlays & Contrôles PractiCal / Polycam
     private var overlayView: ScanOverlayView!
     private var flashView:   UIView!
     private var bottomHUD:   UIView!
@@ -42,6 +44,7 @@ final class ScanViewController: UIViewController {
         setupSceneView()
         setupUI()
         setupCallbacks()
+        PhotogrammetryService.shared.startNewSession()
     }
 
     override func viewWillAppear(_ animated: Bool) {
@@ -79,7 +82,6 @@ final class ScanViewController: UIViewController {
     // MARK: - Interface Utilisateur Style PractiCal (Image 1)
 
     private func setupUI() {
-        // Flash vert pour la capture
         flashView = UIView(frame: view.bounds)
         flashView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         flashView.backgroundColor = UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0)
@@ -87,12 +89,10 @@ final class ScanViewController: UIViewController {
         flashView.isUserInteractionEnabled = false
         view.addSubview(flashView)
 
-        // Superposition 2D réticule et coins colorés
         overlayView = ScanOverlayView(frame: view.bounds)
         overlayView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(overlayView)
 
-        // Barre inférieure sombre style PractiCal
         bottomHUD = UIView()
         bottomHUD.backgroundColor = UIColor(red: 0.08, green: 0.08, blue: 0.12, alpha: 0.92)
         bottomHUD.layer.cornerRadius = 24
@@ -100,7 +100,6 @@ final class ScanViewController: UIViewController {
         bottomHUD.translatesAutoresizingMaskIntoConstraints = false
         view.addSubview(bottomHUD)
 
-        // Bouton Calibrate / Fixer (Vert vif, style Image 1)
         calibrateBtn = UIButton(type: .system)
         calibrateBtn.setTitle("▶ Calibrate / Fixer", for: .normal)
         calibrateBtn.setTitleColor(.white, for: .normal)
@@ -111,7 +110,6 @@ final class ScanViewController: UIViewController {
         calibrateBtn.translatesAutoresizingMaskIntoConstraints = false
         bottomHUD.addSubview(calibrateBtn)
 
-        // Onglets inférieurs : Export | 3D Field | Align | Clear
         tabExportBtn = createTabButton(title: "Export", action: #selector(onExportTapped))
         tabFieldBtn  = createTabButton(title: "3D Field", action: #selector(onFieldTapped), isHighlighted: true)
         tabAlignBtn  = createTabButton(title: "Align ┼", action: #selector(onAlignTapped))
@@ -157,6 +155,15 @@ final class ScanViewController: UIViewController {
         viewModel.onPhotoCaptured = { [weak self] in
             guard let self = self else { return }
             self.triggerFlashAnimation()
+
+            // Sauvegarde de l'image haute définition pour Polycam Object Mode
+            if let pb = self.latestPixelBuffer, let camT = self.lastTransform {
+                PhotogrammetryService.shared.captureFrame(
+                    pixelBuffer: pb,
+                    cameraTransform: camT,
+                    intrinsics: self.viewModel.intrinsics
+                )
+            }
         }
 
         viewModel.onTagLockedFirstTime = { [weak self] worldTransform in
@@ -165,7 +172,7 @@ final class ScanViewController: UIViewController {
         }
     }
 
-    // MARK: - Ancrage Réel 3D CAD dans le Monde ARKit (Style Image 2)
+    // MARK: - Ancrage 3D Polycam Object Mode & Grille CAD dans le Monde ARKit
 
     private func anchorCADSceneInWorld(transform: simd_float4x4) {
         guard tagAnchorNode == nil else { return }
@@ -185,7 +192,16 @@ final class ScanViewController: UIViewController {
         let axes = CADSceneBuilder.createAxes(length: 0.09)
         container.addChildNode(axes)
 
-        // 4. Rectangles calibrés virtuels ("Rectangle 1" Cyan et Magenta style Image 2 & 3)
+        // 4. 3D Bounding Box Polycam ("cropBox")
+        let polycamCropBox = CADSceneBuilder.createPolycamCropBox(
+            width: 0.28,
+            height: 0.18,
+            depth: 0.22,
+            position: SCNVector3(0, 0.09, 0)
+        )
+        container.addChildNode(polycamCropBox)
+
+        // 5. Rectangles calibrés virtuels ("Rectangle 1" Cyan et Magenta style Image 2 & 3)
         let rect1 = CADSceneBuilder.createCalibratedRectangle(
             width: 0.20,
             height: 0.14,
@@ -195,16 +211,7 @@ final class ScanViewController: UIViewController {
         )
         container.addChildNode(rect1)
 
-        let rect2 = CADSceneBuilder.createCalibratedRectangle(
-            width: 0.10,
-            height: 0.10,
-            color: UIColor(red: 1.0, green: 0.2, blue: 0.7, alpha: 1.0),
-            label: "Ref Zone",
-            position: SCNVector3(-0.12, 0.14, 0)
-        )
-        container.addChildNode(rect2)
-
-        // 5. Cadre AprilTag 80mm
+        // 6. Cadre AprilTag 80mm
         let tagPlane = SCNPlane(width: CGFloat(GabaritConfig.tagSizeMm / 1000.0),
                                 height: CGFloat(GabaritConfig.tagSizeMm / 1000.0))
         tagPlane.cornerRadius = 0.003
@@ -216,7 +223,7 @@ final class ScanViewController: UIViewController {
 
         sceneView.scene.rootNode.addChildNode(container)
         tagAnchorNode = container
-        print("🏛️ Scène 3D CAD ancrée dans le monde ARKit !")
+        print("🏛️ Scène 3D Polycam & CAD ancrée dans le monde ARKit !")
     }
 
     // MARK: - Actions des Boutons
@@ -224,19 +231,17 @@ final class ScanViewController: UIViewController {
     @objc private func onCalibrateTapped() {
         if let currentTag = lastTagDetection, !viewModel.isTagLocked {
             viewModel.onManualCapture()
-            calibrateBtn.setTitle("✔ Calibré (3D Verrouillé)", for: .normal)
+            calibrateBtn.setTitle("✔ Calibré (Polycam Mode)", for: .normal)
             calibrateBtn.backgroundColor = UIColor(red: 0.1, green: 0.5, blue: 0.9, alpha: 1.0)
         } else {
-            // Déclenche une prise manuelle ou ouvre 3D Field
             viewModel.onManualCapture()
         }
     }
 
     @objc private func onFieldTapped() {
-        // Ouvre l'environnement 3D complet (Image 2)
         guard let currentFrame = sceneView.session.currentFrame else { return }
 
-        let alert = UIAlertController(title: "3D Field", message: "Chargement de la scène 3D CAD...", preferredStyle: .alert)
+        let alert = UIAlertController(title: "Reconstruction 3D", message: "Traitement du modèle Polycam...", preferredStyle: .alert)
         present(alert, animated: true)
 
         let lockedTransform = viewModel.lockedTagWorldTransform
@@ -267,7 +272,6 @@ final class ScanViewController: UIViewController {
     }
 
     @objc private func onAlignTapped() {
-        // Active/désactive le réticule en croix plein écran (Image 3)
         overlayView.showCrosshairs.toggle()
         tabAlignBtn.backgroundColor = overlayView.showCrosshairs ?
             UIColor(red: 0.1, green: 0.45, blue: 0.95, alpha: 0.9) : UIColor(white: 0.18, alpha: 0.8)
@@ -279,6 +283,7 @@ final class ScanViewController: UIViewController {
         viewModel.unlockTag()
         calibrateBtn.setTitle("▶ Calibrate / Fixer", for: .normal)
         calibrateBtn.backgroundColor = UIColor(red: 0.15, green: 0.78, blue: 0.35, alpha: 1.0)
+        PhotogrammetryService.shared.startNewSession()
     }
 
     @objc private func onExportTapped() {
@@ -305,7 +310,6 @@ extension ScanViewController: ARSCNViewDelegate {}
 extension ScanViewController: ARSessionDelegate {
 
     func session(_ session: ARSession, didUpdate frame: ARFrame) {
-        // 1. Calcul du taux de détection réel (det/s)
         frameCounter += 1
         let nowTime = ProcessInfo.processInfo.systemUptime
         if nowTime - lastFpsTimestamp >= 0.5 {
@@ -314,7 +318,6 @@ extension ScanViewController: ARSessionDelegate {
             lastFpsTimestamp = nowTime
         }
 
-        // 2. Collecte des points 3D optiques (fonctionne sans LiDAR)
         if let featurePoints = frame.rawFeaturePoints?.points {
             viewModel.addFeaturePoints(featurePoints)
         }
@@ -323,6 +326,7 @@ extension ScanViewController: ARSessionDelegate {
         isProcessingFrame = true
 
         let pixelBuffer = frame.capturedImage
+        self.latestPixelBuffer = pixelBuffer
         let intrinsicsMatrix = frame.camera.intrinsics
 
         let intrinsics = CameraIntrinsics(
@@ -353,7 +357,6 @@ extension ScanViewController: ARSessionDelegate {
         let imgH = CGFloat(CVPixelBufferGetHeight(pixelBuffer))
         let imageSize = CGSize(width: imgW, height: imgH)
 
-        // Matrice de projection officielle ARKit pour coller parfaitement aux pixels de l'écran
         let displayTransform = frame.displayTransform(for: .portrait, viewportSize: sceneView.bounds.size)
 
         analysisQueue.async { [weak self] in
@@ -372,7 +375,6 @@ extension ScanViewController: ARSessionDelegate {
                     frameSize: imageSize
                 )
 
-                // Mise à jour de la superposition PractiCal
                 self.overlayView.update(
                     detections: detections,
                     transform: displayTransform,

@@ -89,9 +89,80 @@ extension SCNGeometry {
     }
 }
 
-// MARK: - Constructeurs d'Environnement 3D CAD (Style PractiCal Image 2 & 3)
+// MARK: - Constructeurs d'Environnement 3D CAD & Polycam Object Mode
 
 struct CADSceneBuilder {
+
+    /// Crée la 3D Bounding Box Polycam ("cropCorner / cropBox") avec arêtes lumineuses et étiquettes millimétriques
+    static func createPolycamCropBox(
+        width: Float = 0.28,
+        height: Float = 0.18,
+        depth: Float = 0.22,
+        position: SCNVector3 = SCNVector3(0, 0.09, 0)
+    ) -> SCNNode {
+        let boxNode = SCNNode()
+        boxNode.position = position
+
+        let hw = width * 0.5
+        let hh = height * 0.5
+        let hd = depth * 0.5
+
+        // Les 8 sommets de la boîte
+        let p = [
+            SCNVector3(-hw, -hh, -hd), // 0
+            SCNVector3( hw, -hh, -hd), // 1
+            SCNVector3( hw,  hh, -hd), // 2
+            SCNVector3(-hw,  hh, -hd), // 3
+            SCNVector3(-hw, -hh,  hd), // 4
+            SCNVector3( hw, -hh,  hd), // 5
+            SCNVector3( hw,  hh,  hd), // 6
+            SCNVector3(-hw,  hh,  hd)  // 7
+        ]
+
+        // 12 arêtes
+        let edges: [(Int, Int)] = [
+            (0,1), (1,2), (2,3), (3,0), // Face arrière
+            (4,5), (5,6), (6,7), (7,4), // Face avant
+            (0,4), (1,5), (2,6), (3,7)  // Côtés
+        ]
+
+        var lineVertices: [SCNVector3] = []
+        var lineIndices: [Int32] = []
+        var idx: Int32 = 0
+
+        for edge in edges {
+            lineVertices.append(p[edge.0])
+            lineVertices.append(p[edge.1])
+            lineIndices.append(contentsOf: [idx, idx+1])
+            idx += 2
+        }
+
+        let edgeSource = SCNGeometrySource(vertices: lineVertices)
+        let edgeElement = SCNGeometryElement(indices: lineIndices, primitiveType: .line)
+        let edgeGeom = SCNGeometry(sources: [edgeSource], elements: [edgeElement])
+        edgeGeom.firstMaterial?.diffuse.contents = UIColor(red: 0.15, green: 0.85, blue: 1.0, alpha: 0.9)
+        boxNode.addChildNode(SCNNode(geometry: edgeGeom))
+
+        // Volume semi-transparent (style Polycam)
+        let solidBox = SCNBox(width: CGFloat(width), height: CGFloat(height), length: CGFloat(depth), chamferRadius: 0.005)
+        let boxMat = SCNMaterial()
+        boxMat.diffuse.contents = UIColor(red: 0.1, green: 0.8, blue: 1.0, alpha: 0.12)
+        boxMat.isDoubleSided = true
+        solidBox.materials = [boxMat]
+        boxNode.addChildNode(SCNNode(geometry: solidBox))
+
+        // Étiquette de dimension en mm (ex: 280 x 180 x 220 mm)
+        let dimText = "\(Int(width * 1000)) × \(Int(height * 1000)) × \(Int(depth * 1000)) mm"
+        let textGeom = SCNText(string: dimText, extrusionDepth: 0.001)
+        textGeom.font = UIFont.systemFont(ofSize: 0.016, weight: .heavy)
+        textGeom.firstMaterial?.diffuse.contents = UIColor(red: 0.2, green: 0.9, blue: 1.0, alpha: 1.0)
+        let textNode = SCNNode(geometry: textGeom)
+        textNode.position = SCNVector3(-hw + 0.01, hh + 0.015, hd)
+        textNode.scale = SCNVector3(0.5, 0.5, 0.5)
+        boxNode.addChildNode(textNode)
+
+        return boxNode
+    }
 
     /// Crée une grille 3D CAD métrique (lignes blanches/cyan)
     static func createGrid(sizeMeters: Float = 0.8, stepMeters: Float = 0.05, isVertical: Bool = false) -> SCNNode {
@@ -104,7 +175,6 @@ struct CADSceneBuilder {
         var val = -half
         while val <= half + 1e-4 {
             if isVertical {
-                // Grille verticale murale (XY)
                 vertices.append(SCNVector3(-half, val, 0))
                 vertices.append(SCNVector3( half, val, 0))
                 indices.append(contentsOf: [idx, idx+1])
@@ -115,7 +185,6 @@ struct CADSceneBuilder {
                 indices.append(contentsOf: [idx, idx+1])
                 idx += 2
             } else {
-                // Grille horizontale table/sol (XZ)
                 vertices.append(SCNVector3(-half, 0, val))
                 vertices.append(SCNVector3( half, 0, val))
                 indices.append(contentsOf: [idx, idx+1])
@@ -137,7 +206,7 @@ struct CADSceneBuilder {
         return gridNode
     }
 
-    /// Crée les axes 3D du repère Tag (X: Rouge/Jaune, Y: Vert, Z: Bleu/Cyan)
+    /// Crée les axes 3D du repère Tag (X: Orange, Y: Vert, Z: Cyan)
     static func createAxes(length: Float = 0.08) -> SCNNode {
         let node = SCNNode()
 
@@ -146,13 +215,13 @@ struct CADSceneBuilder {
             return n
         }
 
-        node.addChildNode(makeAxis(to: SCNVector3(length, 0, 0), color: UIColor(red: 1.0, green: 0.6, blue: 0.0, alpha: 1.0))) // X: Orange
-        node.addChildNode(makeAxis(to: SCNVector3(0, length, 0), color: UIColor(red: 0.4, green: 0.9, blue: 0.1, alpha: 1.0))) // Y: Vert/Jaune
-        node.addChildNode(makeAxis(to: SCNVector3(0, 0, length), color: UIColor(red: 0.1, green: 0.8, blue: 1.0, alpha: 1.0))) // Z: Cyan
+        node.addChildNode(makeAxis(to: SCNVector3(length, 0, 0), color: UIColor(red: 1.0, green: 0.6, blue: 0.0, alpha: 1.0)))
+        node.addChildNode(makeAxis(to: SCNVector3(0, length, 0), color: UIColor(red: 0.4, green: 0.9, blue: 0.1, alpha: 1.0)))
+        node.addChildNode(makeAxis(to: SCNVector3(0, 0, length), color: UIColor(red: 0.1, green: 0.8, blue: 1.0, alpha: 1.0)))
         return node
     }
 
-    /// Crée un rectangle de gabarit virtuel calibré avec libellé (Style "Rectangle 1" en Cyan / Magenta des Images 2 & 3)
+    /// Crée un rectangle de gabarit virtuel calibré avec libellé (Style "Rectangle 1" Cyan & Magenta)
     static func createCalibratedRectangle(
         width: Float,
         height: Float,
@@ -166,7 +235,6 @@ struct CADSceneBuilder {
         let halfW = width * 0.5
         let halfH = height * 0.5
 
-        // Cadre filaire
         let p0 = SCNVector3(-halfW, -halfH, 0)
         let p1 = SCNVector3( halfW, -halfH, 0)
         let p2 = SCNVector3( halfW,  halfH, 0)
@@ -180,7 +248,6 @@ struct CADSceneBuilder {
         borderGeom.firstMaterial?.diffuse.contents = color
         container.addChildNode(SCNNode(geometry: borderGeom))
 
-        // Surface semi-transparente
         let plane = SCNPlane(width: CGFloat(width), height: CGFloat(height))
         let mat = SCNMaterial()
         mat.diffuse.contents = color.withAlphaComponent(0.2)
@@ -188,7 +255,6 @@ struct CADSceneBuilder {
         plane.materials = [mat]
         container.addChildNode(SCNNode(geometry: plane))
 
-        // Étiquette texte
         let textGeom = SCNText(string: label, extrusionDepth: 0.001)
         textGeom.font = UIFont.boldSystemFont(ofSize: 0.012)
         textGeom.firstMaterial?.diffuse.contents = color
