@@ -14,7 +14,7 @@ struct GabaritConfig {
     static var surfaceFinish: String = "matte"
 
     /// Nombre de vues orbitales à capturer
-    static var numGuideViews: Int = 24
+    static var numGuideViews: Int = 150
 
     /// Famille AprilTag (0 = tag36h11)
     static var tagFamilyId: Int = 0

@@ -21,7 +21,7 @@ final class ScanViewModel: ObservableObject {
     @Published var isTagLocked: Bool = false
     @Published var motionState: MotionState = .idle
 
-    let targetPhotoCount: Int = 30
+    let targetPhotoCount: Int = 150
 
     var intrinsics: CameraIntrinsics = .defaultIPhone12ProMax
 
