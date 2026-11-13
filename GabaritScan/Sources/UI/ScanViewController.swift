@@ -1,27 +1,52 @@
 import UIKit
 import ARKit
+import SceneKit
 import simd
 
-/// UIViewController utilisant ARKit natif pour la capture et le tracking
+/// Extension pour convertir le maillage ARKit LiDAR en géométrie 3D SceneKit
+extension SCNGeometry {
+    convenience init(arMeshGeometry: ARMeshGeometry) {
+        let vertices = arMeshGeometry.vertices
+        let faces = arMeshGeometry.faces
+
+        let vertexSource = SCNGeometrySource(
+            buffer: vertices.buffer,
+            vertexFormat: vertices.format,
+            semantic: .vertex,
+            vertexCount: vertices.count,
+            dataOffset: vertices.offset,
+            dataStride: vertices.stride
+        )
+
+        let faceData = Data(bytesNoCopy: faces.buffer.contents(), count: faces.buffer.length, deallocator: .none)
+        let faceElement = SCNGeometryElement(
+            data: faceData,
+            primitiveType: .triangles,
+            primitiveCount: faces.count,
+            bytesPerIndex: faces.bytesPerIndex
+        )
+
+        self.init(sources: [vertexSource], elements: [faceElement])
+    }
+}
+
+/// UIViewController avec LiDAR temps réel et maillage 3D actif
 final class ScanViewController: UIViewController {
 
     var viewModel: ScanViewModel!
 
-    // ARSCNView gère le rendu de la caméra à 60 fps avec l'orientation exacte
     private var sceneView: ARSCNView!
-
-    // AprilTag detector
     private lazy var aprilTagDetector = AprilTagDetector(tagSizeMm: GabaritConfig.tagSizeMm)
     private let analysisQueue = DispatchQueue(label: "com.gabaritscan.analysis", qos: .userInteractive)
     private var isProcessingFrame = false
 
-    // AR tracking velocity estimation
     private var lastTransform: simd_float4x4? = nil
     private var lastTimestamp: TimeInterval = 0
 
     // UI Overlays
     private var overlayView: ScanOverlayView!
     private var guideLabel:  UILabel!
+    private var lidarBadge:  UILabel!
     private var captureBtn:  UIButton!
     private var progressBar: UIProgressView!
     private var progressLbl: UILabel!
@@ -35,9 +60,7 @@ final class ScanViewController: UIViewController {
 
     override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
-        let config = ARWorldTrackingConfiguration()
-        config.worldAlignment = .gravity
-        sceneView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+        startARSessionWithLiDAR()
     }
 
     override func viewWillDisappear(_ animated: Bool) {
@@ -45,12 +68,49 @@ final class ScanViewController: UIViewController {
         sceneView.session.pause()
     }
 
-    // MARK: - SceneView (ARKit Camera)
+    // MARK: - Configuration LiDAR & ARKit
+
+    private func startARSessionWithLiDAR() {
+        guard ARWorldTrackingConfiguration.isSupported else {
+            lidarBadge.text = "❌ ARKit non supporté"
+            return
+        }
+
+        let config = ARWorldTrackingConfiguration()
+        config.worldAlignment = .gravity
+
+        // 1. Activer la reconstruction de maillage LiDAR si supportée
+        if ARWorldTrackingConfiguration.supportsSceneReconstruction(.mesh) {
+            config.sceneReconstruction = .mesh
+            lidarBadge.text = "🟢 LiDAR 3D ACTIF"
+            lidarBadge.textColor = UIColor(red: 0.2, green: 1.0, blue: 0.4, alpha: 1.0)
+        } else {
+            lidarBadge.text = "⚠️ Mode Caméra Optique (Sans LiDAR)"
+            lidarBadge.textColor = .yellow
+        }
+
+        // 2. Activer la carte de profondeur LiDAR
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.sceneDepth) {
+            config.frameSemantics.insert(.sceneDepth)
+        }
+        if ARWorldTrackingConfiguration.supportsFrameSemantics(.smoothedSceneDepth) {
+            config.frameSemantics.insert(.smoothedSceneDepth)
+        }
+
+        // Lancer la session
+        sceneView.session.run(config, options: [.resetTracking, .removeExistingAnchors])
+    }
 
     private func setupSceneView() {
         sceneView = ARSCNView(frame: view.bounds)
         sceneView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        sceneView.delegate = self
         sceneView.session.delegate = self
+        sceneView.autoenablesDefaultLighting = true
+
+        // Options de débogage pour voir le maillage et les points en direct
+        sceneView.debugOptions = [.showFeaturePoints]
+
         view.addSubview(sceneView)
     }
 
@@ -60,6 +120,18 @@ final class ScanViewController: UIViewController {
         overlayView = ScanOverlayView(frame: view.bounds)
         overlayView.autoresizingMask = [.flexibleWidth, .flexibleHeight]
         view.addSubview(overlayView)
+
+        // Badge d'état du LiDAR en haut à gauche
+        lidarBadge = UILabel()
+        lidarBadge.text = "⏳ Détection LiDAR..."
+        lidarBadge.font = .systemFont(ofSize: 12, weight: .bold)
+        lidarBadge.textColor = .white
+        lidarBadge.backgroundColor = UIColor.black.withAlphaComponent(0.7)
+        lidarBadge.layer.cornerRadius = 6
+        lidarBadge.clipsToBounds = true
+        lidarBadge.textAlignment = .center
+        lidarBadge.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(lidarBadge)
 
         guideLabel = UILabel()
         guideLabel.text = "Pointez le tag AprilTag"
@@ -95,7 +167,12 @@ final class ScanViewController: UIViewController {
         view.addSubview(captureBtn)
 
         NSLayoutConstraint.activate([
-            guideLabel.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 12),
+            lidarBadge.topAnchor.constraint(equalTo: view.safeAreaLayoutGuide.topAnchor, constant: 8),
+            lidarBadge.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            lidarBadge.widthAnchor.constraint(greaterThanOrEqualToConstant: 140),
+            lidarBadge.heightAnchor.constraint(equalToConstant: 26),
+
+            guideLabel.topAnchor.constraint(equalTo: lidarBadge.bottomAnchor, constant: 8),
             guideLabel.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 20),
             guideLabel.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -20),
             guideLabel.heightAnchor.constraint(greaterThanOrEqualToConstant: 50),
@@ -116,7 +193,6 @@ final class ScanViewController: UIViewController {
     }
 
     @objc private func onCaptureTapped() {
-        // Animation du bouton
         UIView.animate(withDuration: 0.1, animations: {
             self.captureBtn.transform = CGAffineTransform(scaleX: 0.9, y: 0.9)
         }) { _ in
@@ -141,6 +217,34 @@ final class ScanViewController: UIViewController {
     }
 }
 
+// MARK: - ARSCNViewDelegate (Rendu du maillage LiDAR 3D en direct)
+
+extension ScanViewController: ARSCNViewDelegate {
+
+    func renderer(_ renderer: SCNSceneRenderer, nodeFor anchor: ARAnchor) -> SCNNode? {
+        guard let meshAnchor = anchor as? ARMeshAnchor else { return nil }
+
+        let geometry = SCNGeometry(arMeshGeometry: meshAnchor.geometry)
+        let material = SCNMaterial()
+        material.diffuse.contents = UIColor(red: 0.1, green: 0.6, blue: 1.0, alpha: 0.35)
+        material.fillMode = .lines // Wireframe / Grillage 3D
+        geometry.materials = [material]
+
+        let node = SCNNode(geometry: geometry)
+        return node
+    }
+
+    func renderer(_ renderer: SCNSceneRenderer, didUpdate node: SCNNode, for anchor: ARAnchor) {
+        guard let meshAnchor = anchor as? ARMeshAnchor else { return }
+        let geometry = SCNGeometry(arMeshGeometry: meshAnchor.geometry)
+        let material = SCNMaterial()
+        material.diffuse.contents = UIColor(red: 0.1, green: 0.6, blue: 1.0, alpha: 0.35)
+        material.fillMode = .lines
+        geometry.materials = [material]
+        node.geometry = geometry
+    }
+}
+
 // MARK: - ARSessionDelegate
 
 extension ScanViewController: ARSessionDelegate {
@@ -152,7 +256,6 @@ extension ScanViewController: ARSessionDelegate {
         let pixelBuffer = frame.capturedImage
         let intrinsicsMatrix = frame.camera.intrinsics
 
-        // Mettre à jour les intrinsèques exactes du capteur
         let intrinsics = CameraIntrinsics(
             fx: intrinsicsMatrix[0][0],
             fy: intrinsicsMatrix[1][1],
