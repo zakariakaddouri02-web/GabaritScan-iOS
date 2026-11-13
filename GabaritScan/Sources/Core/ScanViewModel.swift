@@ -2,23 +2,33 @@ import Foundation
 import simd
 import Combine
 import UIKit
-import AudioToolbox
 
-/// ViewModel gérant le verrouillage spatial fixe de l'AprilTag et l'auto-capture sans LiDAR
+// MARK: - MotionState
+
+enum MotionState {
+    case idle
+    case scanning
+    case tooFast
+    case complete
+}
+
+/// ViewModel gérant le verrouillage spatial fixe de l'AprilTag et l'auto-capture
 @MainActor
 final class ScanViewModel: ObservableObject {
 
     @Published private(set) var state = ScanState()
     @Published var capturedCount: Int = 0
     @Published var isTagLocked: Bool = false
+    @Published var motionState: MotionState = .idle
+
     let targetPhotoCount: Int = 30
 
     var intrinsics: CameraIntrinsics = .defaultIPhone12ProMax
 
-    // Repère spatial fixe de l'AprilTag dans le monde ARKit (matrice 4x4)
+    // Repère spatial fixe de l'AprilTag dans le monde ARKit
     public private(set) var lockedTagWorldTransform: simd_float4x4? = nil
 
-    // Points 3D accumulés depuis le tracking optique ARKit (pour reconstruire le gabarit sans LiDAR)
+    // Points 3D accumulés depuis le tracking optique ARKit
     public private(set) var accumulatedPoints: [SIMD3<Float>] = []
     private var pointSpatialIndex = Set<Int64>()
 
@@ -27,10 +37,14 @@ final class ScanViewModel: ObservableObject {
     private var lastCapturedRotation: simd_quatf? = nil
     private var lastCaptureTimestamp: TimeInterval = 0
 
-    // Déclenchement automatique : bouger de 6 cm OU pivoter de 8°
+    // Seuils auto-capture
     private let minDistanceMeters: Float = 0.06
     private let minAngleDegrees: Float   = 8.0
     private let minTimeInterval: TimeInterval = 0.4
+
+    // Seuils vitesse pour MotionState
+    private let tooFastThreshold: Float   = 0.8  // m/s
+    private let notMovingThreshold: Float = 0.02 // m/s
 
     private let hapticGenerator = UIImpactFeedbackGenerator(style: .heavy)
 
@@ -38,20 +52,25 @@ final class ScanViewModel: ObservableObject {
     var onScanCompleted: (() -> Void)?
     var onTagLockedFirstTime: ((simd_float4x4) -> Void)?
 
+    // Computed progress 0.0 … 1.0
+    var scanProgressPercent: Double {
+        guard targetPhotoCount > 0 else { return 0 }
+        return min(Double(capturedCount) / Double(targetPhotoCount), 1.0)
+    }
+
     init() {
         hapticGenerator.prepare()
     }
 
-    /// Réinitialise l'ancrage du tag si l'utilisateur veut le recalibrer
     func unlockTag() {
         lockedTagWorldTransform = nil
         isTagLocked = false
         lastCapturedPosition = nil
         lastCapturedRotation = nil
+        motionState = .idle
         print("🔄 Repère AprilTag déverrouillé")
     }
 
-    /// Accumulation spatiale des points 3D vus par la caméra (grille de 4mm)
     func addFeaturePoints(_ points: [SIMD3<Float>]) {
         for pt in points {
             let kx = Int64(round(pt.x * 250.0))
@@ -77,12 +96,11 @@ final class ScanViewModel: ObservableObject {
         let currentRot = simd_quaternion(cameraTransform)
         let now = ProcessInfo.processInfo.systemUptime
 
-        // ── 1. VERROUILLAGE UNIQUE DE L'APRILTAG DANS LE MONDE (SPATIAL ANCHOR) ──
+        // ── 1. VERROUILLAGE UNIQUE DE L'APRILTAG ──
         if let firstTag = tagDetections.first {
             let R = rodriguesMatrix(firstTag.rvec)
-            let t = firstTag.tvec / 1000.0 // mm vers mètres
+            let t = firstTag.tvec / 1000.0
 
-            // Conversion repère caméra OpenCV -> ARKit
             let tagToCamera = simd_float4x4(
                 SIMD4( R[0], -R[3], -R[6], 0),
                 SIMD4(-R[1],  R[4],  R[7], 0),
@@ -90,51 +108,57 @@ final class ScanViewModel: ObservableObject {
                 SIMD4(  t.x,  -t.y,  -t.z, 1)
             )
 
-            // Calculer la position absolue du tag dans le monde ARKit
             let calculatedTagWorld = matrix_multiply(cameraTransform, tagToCamera)
 
             if lockedTagWorldTransform == nil {
                 lockedTagWorldTransform = calculatedTagWorld
                 isTagLocked = true
-                print("🔒 AprilTag FIXÉ dans l'espace avec succès !")
+                print("🔒 AprilTag FIXÉ dans l'espace !")
 
-                // Vibration d'ancrage
-                AudioServicesPlaySystemSound(1520)
+                // Vibration d'ancrage — heavy impact only (no AudioServices)
                 hapticGenerator.impactOccurred()
                 onTagLockedFirstTime?(calculatedTagWorld)
             }
         }
 
-        // ── 2. CALCUL DE LA POSITION PAR RAPPORT AU TAG (MÊME DERRIÈRE L'OBJET) ──
+        // ── 2. POSITION CAMÉRA DANS LE REPÈRE DU TAG ──
         var cameraInTagFrame: CameraPositionInTagFrame? = nil
-
         if let tagWorld = lockedTagWorldTransform {
             let worldToTag = tagWorld.inverse
             let camInTagMat = matrix_multiply(worldToTag, cameraTransform)
             let tx = camInTagMat.columns.3.x
             let ty = camInTagMat.columns.3.y
             let tz = camInTagMat.columns.3.z
-
-            let dist = sqrt(tx*tx + ty*ty + tz*tz) * 1000.0 // en mm
+            let dist = sqrt(tx*tx + ty*ty + tz*tz) * 1000.0
             let azimuth = atan2(tx, tz) * 180.0 / .pi
             let elevation = atan2(-ty, sqrt(tx*tx + tz*tz)) * 180.0 / .pi
-
             cameraInTagFrame = CameraPositionInTagFrame(azimuthDeg: azimuth, elevationDeg: elevation, distanceMm: dist)
         }
 
-        // ── 3. AUTO-CAPTURE FLUIDE ET CONTINUE ──
+        // ── 3. MISE À JOUR MOTION STATE ──
+        if capturedCount >= targetPhotoCount {
+            motionState = .complete
+        } else if !isTagLocked {
+            motionState = .idle
+        } else if cameraVelocity > tooFastThreshold {
+            motionState = .tooFast
+        } else if cameraVelocity < notMovingThreshold && lastCapturedPosition != nil {
+            motionState = .idle
+        } else {
+            motionState = .scanning
+        }
+
+        // ── 4. AUTO-CAPTURE ──
         var shouldCapture = false
 
         if isTagLocked {
             if lastCapturedPosition == nil {
-                // Dès que le tag est fixé, première photo immédiate !
                 shouldCapture = true
             } else if let lastPos = lastCapturedPosition, let lastRot = lastCapturedRotation {
                 let distance = simd_distance(currentPos, lastPos)
                 let angleDiff = rotationAngleDifference(currentRot, lastRot)
                 let timeElapsed = now - lastCaptureTimestamp
 
-                // Déclenchement automatique dès qu'on bouge ou tourne
                 if (distance >= minDistanceMeters || angleDiff >= minAngleDegrees) &&
                    timeElapsed >= minTimeInterval &&
                    cameraVelocity < 1.2 {
@@ -147,20 +171,21 @@ final class ScanViewModel: ObservableObject {
             triggerCapture(pos: currentPos, rot: currentRot, timestamp: now)
         }
 
-        // Message guidage clair
+        // ── 5. MESSAGE GUIDAGE ──
         let message: String
         if capturedCount >= targetPhotoCount {
-            message = "🎉 Scan complet (\(capturedCount) photos) ! Appuyez sur 'Générer 3D 🎲'"
+            message = "Scan complet ! Appuyez sur Terminer"
         } else if isTagLocked {
-            message = "🔒 Repère Fixé ! Tournez autour du gabarit (\(capturedCount)/\(targetPhotoCount))"
+            message = "Tournez lentement autour de l'objet"
         } else {
-            message = "🔍 Pointez l'AprilTag UNE FOIS pour verrouiller le repère"
+            message = "Pointez l'AprilTag pour verrouiller le repère"
         }
 
         state = ScanState(
             tagDetections:    tagDetections,
             arkitPose:        ARKitPose(transform: cameraTransform, isTracking: true, velocityMagnitude: cameraVelocity),
-            frameQuality:     FrameQuality(trackingLost: false, tagVisible: isTagLocked, tagPoseGood: true, isStable: cameraVelocity < 0.35, isBlurry: false, hasReflection: false),
+            frameQuality:     FrameQuality(trackingLost: false, tagVisible: isTagLocked, tagPoseGood: true,
+                                           isStable: cameraVelocity < 0.35, isBlurry: false, hasReflection: false),
             cameraInTagFrame: cameraInTagFrame,
             nextGuideTarget:  nil,
             capturedCount:    capturedCount,
@@ -172,7 +197,7 @@ final class ScanViewModel: ObservableObject {
 
     func onManualCapture() {
         let now = ProcessInfo.processInfo.systemUptime
-        let pos = lastCapturedPosition ?? SIMD3<Float>(0,0,0)
+        let pos = lastCapturedPosition ?? SIMD3<Float>(0, 0, 0)
         let rot = lastCapturedRotation ?? simd_quaternion(matrix_identity_float4x4)
         triggerCapture(pos: pos, rot: rot, timestamp: now)
     }
@@ -183,15 +208,14 @@ final class ScanViewModel: ObservableObject {
         lastCapturedRotation = rot
         lastCaptureTimestamp = timestamp
 
-        // VIBRATION RÉELLE ET FORTE DU TÉLÉPHONE
-        AudioServicesPlaySystemSound(kSystemSoundID_Vibrate)
+        // Heavy haptic only — no AudioServices sound
         hapticGenerator.impactOccurred()
 
         onPhotoCaptured?()
 
         if capturedCount >= targetPhotoCount {
             print("🎉 Scan complet (\(capturedCount) photos) !")
-            AudioServicesPlaySystemSound(1521)
+            motionState = .complete
             onScanCompleted?()
         }
     }
